@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:core';
 import 'package:flutter/material.dart';
 import '../config/constants/app_colors.dart';
 import '../components/common/custom_card.dart';
@@ -7,8 +9,10 @@ import '../components/common/basket_detail_modal.dart';
 import '../components/common/bin_location_modal.dart';
 import '../components/common/rack_detail_modal.dart';
 import '../components/common/filled_basket_qty_modal.dart';
+import '../components/common/rfid_scanned_items_modal.dart';
 import '../services/rfid_scanner.dart';
 import '../services/api_service.dart';
+import 'package:wms_flutter/models/scanned_item.dart';
 
 class FormerStockInScreen extends StatefulWidget {
   const FormerStockInScreen({Key? key}) : super(key: key);
@@ -43,6 +47,16 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
 
   final FocusNode _keyboardFocusNode = FocusNode();
 
+  // ========== PERFORMANCE OPTIMIZATION ==========
+  // API processing queue
+  final Queue<String> _unfetchedTags = Queue<String>();
+  bool _isProcessingQueue = false;
+  
+  // Stats tracking (updated without rebuilding UI)
+  int _totalBaskets = 0;
+  int _totalFormers = 0;
+  // ============================================
+
   @override
   void initState() {
     super.initState();
@@ -55,6 +69,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     _tagSubscription?.cancel();
     _statusSubscription?.cancel();
     _errorSubscription?.cancel();
+    
     if (isScanning) {
       _rfidScanner.stopScan();
     }
@@ -123,10 +138,15 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
 
   bool _singleTagCaptured = false;
 
+  // ========== OPTIMIZED TAG HANDLING ==========
   void _handleTagScanned(TagData tagData) async {
     if (_basketMode == BasketMode.filled && _singleTagCaptured) return;
 
     final tagId = tagData.tagId;
+
+    // Skip if already processed
+    if (_allRackTagIds.contains(tagId)) return;
+    if (_scannedItemsMap.containsKey(tagId)) return;
 
     int quantity = 0;
 
@@ -134,16 +154,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       quantity = 5;
     } else if (_basketMode == BasketMode.empty) {
       quantity = 0;
-    }
-
-    // Already exists in ANY rack
-    if (_allRackTagIds.contains(tagId)) {
-      return;
-    }
-
-    // Already scanned in current session
-    if (_scannedItemsMap.containsKey(tagId)) {
-      return;
     }
 
     if (_basketMode == BasketMode.filled) {
@@ -161,38 +171,91 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       quantity = selectedQty;
     }
 
-    try {
-      final basketData = await ApiService.getBasketData(tagData.tagId);
+    // Create item with loading state (no UI rebuild)
+    final pendingItem = ScannedItem(
+      id: tagId,
+      quantity: quantity,
+      vendor: '',
+      bin: '',
+      status: ItemStatus.pending,
+      rssi: tagData.rssi,
+    );
 
-      if (basketData == null) {
-        return;
-      }
+    // Add to map without rebuilding UI
+    _scannedItemsMap[tagId] = pendingItem;
+    
+    // Update stats counter only
+    _updateStats();
 
+    // Queue API fetch (non-blocking)
+    _unfetchedTags.add(tagId);
+    _processApiQueue();
+  }
+
+  // Update stats without full UI rebuild
+  void _updateStats() {
+    final baskets = _scannedItemsMap.values
+        .where((item) => item.status == ItemStatus.success)
+        .length;
+    final formers = _scannedItemsMap.values
+        .fold<int>(0, (sum, item) => sum + item.quantity);
+    
+    if (_totalBaskets != baskets || _totalFormers != formers) {
       setState(() {
-        _scannedItemsMap[tagData.tagId] = ScannedItem(
-          id: tagData.tagId,
-          quantity: quantity,
-          vendor: basketData.basketVendor,
-          bin: basketData.basketPurchaseOrder,
-          status: ItemStatus.success,
-          rssi: tagData.rssi,
-          basketData: basketData,
-        );
-      });
-    } catch (e) {
-      setState(() {
-        _scannedItemsMap[tagData.tagId] = ScannedItem(
-          id: tagData.tagId,
-          quantity: 0,
-          vendor: '',
-          bin: '',
-          status: ItemStatus.error,
-          errorMessage: 'Failed to fetch data: $e',
-          rssi: tagData.rssi,
-        );
+        _totalBaskets = baskets;
+        _totalFormers = formers;
       });
     }
   }
+
+  // Process API calls in background queue
+  Future<void> _processApiQueue() async {
+    if (_isProcessingQueue) return;
+    _isProcessingQueue = true;
+
+    while (_unfetchedTags.isNotEmpty) {
+      final tagId = _unfetchedTags.removeFirst();
+      
+      try {
+        final basketData = await ApiService.getBasketData(tagId);
+
+        if (basketData != null) {
+          final existingItem = _scannedItemsMap[tagId];
+          if (existingItem != null) {
+            existingItem.status = ItemStatus.success;
+            existingItem.vendor = basketData.basketVendor;
+            existingItem.bin = basketData.basketPurchaseOrder;
+            existingItem.basketData = basketData;
+            _updateStats();
+          }
+        } else {
+          final existingItem = _scannedItemsMap[tagId];
+          if (existingItem != null) {
+            existingItem.status = ItemStatus.error;
+            existingItem.quantity = 0;
+            existingItem.errorMessage = 'No data found for this tag';
+            _updateStats();
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          final existingItem = _scannedItemsMap[tagId];
+          if (existingItem != null) {
+            existingItem.status = ItemStatus.error;
+            existingItem.quantity = 0;
+            existingItem.errorMessage = 'Failed to fetch data: $e';
+            _updateStats();
+          }
+        }
+      }
+
+      // Small delay to prevent overwhelming the API
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+
+    _isProcessingQueue = false;
+  }
+  // ============================================
 
   void _handleStatusChange(ConnectionStatus status) {
     switch (status) {
@@ -276,7 +339,12 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     if (confirm == true) {
       try {
         await _rfidScanner.clearSeenTags();
-        setState(() => _scannedItemsMap.clear());
+        setState(() {
+          _scannedItemsMap.clear();
+          _unfetchedTags.clear();
+          _totalBaskets = 0;
+          _totalFormers = 0;
+        });
         AppModal.showSuccess(
           context: context,
           title: 'Cleared',
@@ -304,18 +372,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
 
   void _showWarning(String title, String message) {
     AppModal.showWarning(context: context, title: title, message: message);
-  }
-
-  void _showItemDetails(ScannedItem item) {
-    if (item.basketData != null) {
-      BasketDetailModal.show(context: context, basketData: item.basketData!);
-    } else {
-      AppModal.showError(
-        context: context,
-        title: 'No Data',
-        message: 'No basket data available for this item',
-      );
-    }
   }
 
   void _updatePowerFromLevel(int level) {
@@ -352,15 +408,14 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       _racks.add(
         Rack(
           rackNo: currentRackNo,
-          items: _scannedItemsMap.values
-              .map((e) => e)
-              .toList(),
+          items: _scannedItemsMap.values.map((e) => e).toList(),
         ),
       );
 
       _allRackTagIds.addAll(_scannedItemsMap.keys);
-
       _scannedItemsMap.clear();
+      _totalBaskets = 0;
+      _totalFormers = 0;
     });
 
     AppModal.showSuccess(
@@ -390,38 +445,115 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     }
   }
 
+  // Show scanned items modal
+  Future<void> _showScannedItemsModal() async {
+    if (_scannedItemsMap.isEmpty) {
+      _showWarning('Empty', 'No scanned items to view');
+      return;
+    }
+
+    await RfidScannedItemsModal.show(
+      context: context,
+      scannedItemsMap: _scannedItemsMap,
+      onBinLocationChanged: (item, bin) {
+        setState(() {
+          for (final scannedItem in _scannedItemsMap.values) {
+            scannedItem.bin = bin;
+          }
+        });
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.backgroundLight,
       appBar: _buildAppBar(),
-      body: Stack(
+      body: _buildOptimizedBody(),
+    );
+  }
+
+  // ========== OPTIMIZED LAYOUT (No Item List) ==========
+  Widget _buildOptimizedBody() {
+    return Stack(
+      children: [
+        SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+          child: Column(
+            children: [
+              _buildFormSelector(),
+              const SizedBox(height: 24),
+              _buildBasketModeSelector(),
+              const SizedBox(height: 24),
+              _buildStatsCards(),
+              const SizedBox(height: 24),
+              _buildRFIDPowerCard(),
+              const SizedBox(height: 24),
+              if (isScanning)
+                _buildScanningIndicator(),
+            ],
+          ),
+        ),
+        _buildBottomBar(),
+      ],
+    );
+  }
+
+  Widget _buildScanningIndicator() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.primary.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: AppColors.primary.withOpacity(0.3),
+          width: 2,
+        ),
+      ),
+      child: Row(
         children: [
-          SingleChildScrollView(
-            padding: const EdgeInsets.only(bottom: 100),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildFormSelector(),
-                  const SizedBox(height: 24),
-                  _buildBasketModeSelector(),
-                  const SizedBox(height: 24),
-                  _buildStatsCards(),
-                  const SizedBox(height: 24),
-                  _buildRFIDPowerCard(),
-                  const SizedBox(height: 24),
-                  _buildScannedItemsList(),
-                ],
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: const AlwaysStoppedAnimation<Color>(
+                AppColors.primary,
               ),
             ),
           ),
-          _buildBottomBar(),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'SCANNING IN PROGRESS',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.primary,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${_scannedItemsMap.length} items scanned • Tap stats to view',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
+  // ============================================
 
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
@@ -519,7 +651,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
             setState(() => _basketMode = mode);
 
             if (mode == BasketMode.filled) {
-              // switch to single scan mode
               await _rfidScanner.stopScan();
             }
           },
@@ -572,21 +703,32 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
   }
 
   Widget _buildStatsCards() {
-    final totalBaskets = _scannedItemsMap.length;
-    final totalFormers = scannedItems.fold<int>(0, (sum, item) => sum + item.quantity);
-
     return Row(
       children: [
-        Expanded(child: _buildStatCard('BASKETS', totalBaskets.toString(), AppColors.textPrimary, false)),
+        Expanded(
+          child: _buildStatCard(
+            'BASKETS',
+            _totalBaskets.toString(),
+            AppColors.textPrimary,
+            true, // Make clickable
+          ),
+        ),
         const SizedBox(width: 12),
-        Expanded(child: _buildStatCard('FORMERS', totalFormers.toString(), AppColors.primary, false)),
+        Expanded(
+          child: _buildStatCard(
+            'FORMERS',
+            _totalFormers.toString(),
+            AppColors.primary,
+            true, // Make clickable
+          ),
+        ),
         const SizedBox(width: 12),
         Expanded(
           child: _buildStatCard(
             'RACK',
             _racks.length.toString().padLeft(1, '0'),
             const Color(0xFFE11D48),
-            true,
+            false, // Rack modal is separate
           ),
         ),
       ],
@@ -597,8 +739,10 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     String label,
     String value,
     Color color,
-    bool isRack,
+    bool isClickableForItems,
   ) {
+    final isRack = label == 'RACK';
+    
     return GestureDetector(
       onTap: isRack
           ? () {
@@ -607,7 +751,9 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                 racks: _racks,
               );
             }
-          : null,
+          : isClickableForItems
+              ? _showScannedItemsModal
+              : null,
       child: Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
@@ -626,15 +772,29 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
         ),
         child: Column(
           children: [
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
-                color:
-                    isRack ? const Color(0xFFE11D48) : AppColors.textSecondary,
-                letterSpacing: -0.5,
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    color: isRack
+                        ? const Color(0xFFE11D48)
+                        : AppColors.textSecondary,
+                    letterSpacing: -0.5,
+                  ),
+                ),
+                if (isClickableForItems && _scannedItemsMap.isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  Icon(
+                    Icons.visibility,
+                    size: 12,
+                    color: color.withOpacity(0.6),
+                  ),
+                ],
+              ],
             ),
             const SizedBox(height: 4),
             Text(
@@ -732,7 +892,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                 ),
                 const SizedBox(height: 20),
                 
-                // Scanner Status Section
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -803,7 +962,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                 ),
                 const SizedBox(height: 20),
                 
-                // Power Slider
                 Row(
                   children: [
                     IconButton(
@@ -942,416 +1100,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     );
   }
 
-  Widget _buildScannedItemsList() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'SCANNED ITEMS (${scannedItems.length})',
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textSecondary,
-                  letterSpacing: 1.2,
-                ),
-              ),
-              if (scannedItems.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    'LAST SCAN: ${_getLastScanTime()}',
-                    style: const TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.primary,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        if (scannedItems.isEmpty)
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.all(32),
-              child: Column(
-                children: [
-                  Icon(
-                    Icons.qr_code_scanner,
-                    size: 64,
-                    color: AppColors.textTertiary.withOpacity(0.5),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'No items scanned yet',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textTertiary.withOpacity(0.7),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Press START to begin scanning',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: AppColors.textTertiary.withOpacity(0.5),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          )
-        else
-          ListView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: scannedItems.length,
-            itemBuilder: (context, index) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _buildScannedItemCard(scannedItems[index]),
-              );
-            },
-          ),
-      ],
-    );
-  }
-
-  String _getLastScanTime() {
-    return 'JUST NOW';
-  }
-
-  Widget _buildScannedItemCard(ScannedItem item) {
-    Color qtyBgColor;
-    Color qtyTextColor;
-    Color statusBgColor;
-    Color statusTextColor;
-    String statusLabel;
-    Color borderColor;
-
-    switch (item.status) {
-      case ItemStatus.success:
-        qtyBgColor = const Color(0xFFECFDF5);
-        qtyTextColor = const Color(0xFF059669);
-        statusBgColor = const Color(0xFFD1FAE5);
-        statusTextColor = const Color(0xFF047857);
-        statusLabel = 'SUCCESS';
-        borderColor = AppColors.slate100;
-        break;
-
-      case ItemStatus.duplicate:
-        qtyBgColor = const Color(0xFFFEF3C7);
-        qtyTextColor = const Color(0xFFD97706);
-        statusBgColor = const Color(0xFFFDE68A);
-        statusTextColor = const Color(0xFFB45309);
-        statusLabel = 'DUPLICATE';
-        borderColor = AppColors.slate100;
-        break;
-
-      case ItemStatus.pending:
-        qtyBgColor = const Color(0xFFE0E7FF);
-        qtyTextColor = const Color(0xFF4F46E5);
-        statusBgColor = const Color(0xFFDDD6FE);
-        statusTextColor = const Color(0xFF6366F1);
-        statusLabel = 'LOADING...';
-        borderColor = AppColors.slate100;
-        break;
-
-      case ItemStatus.error:
-        qtyBgColor = const Color(0xFFFEE2E2);
-        qtyTextColor = const Color(0xFFDC2626);
-        statusBgColor = const Color(0xFFFECDD3);
-        statusTextColor = const Color(0xFFBE123C);
-        statusLabel = 'ERROR';
-        borderColor = const Color(0xFFFFE4E6);
-        break;
-    }
-
-    return GestureDetector(
-      onTap:
-          item.status == ItemStatus.success ? () => _showItemDetails(item) : null,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: borderColor),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.03),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                // QTY box
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: qtyBgColor,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        'QTY',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          color: qtyTextColor,
-                        ),
-                      ),
-                      Text(
-                        '${item.quantity}',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                          color: qtyTextColor,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 16),
-
-                // Main content
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              item.id,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                                color: AppColors.textPrimary,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: statusBgColor,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              statusLabel,
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                color: statusTextColor,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-
-                      if (item.status == ItemStatus.success &&
-                          item.vendor.isNotEmpty)
-                        Text(
-                          'Vendor: ${item.vendor}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: AppColors.textSecondary,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        )
-                      else if (item.status == ItemStatus.error)
-                        Text(
-                          item.errorMessage ?? 'Unknown error',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFFDC2626),
-                            fontStyle: FontStyle.italic,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        )
-                      else if (item.status == ItemStatus.pending)
-                        const Text(
-                          'Fetching basket data...',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.textSecondary,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        )
-                      else if (item.status == ItemStatus.duplicate)
-                        const Text(
-                          'Already scanned',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFFD97706),
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-
-                if (item.basketData != null) ...[
-                  const SizedBox(width: 8),
-                  const Icon(
-                    Icons.info_outline,
-                    size: 20,
-                    color: AppColors.textTertiary,
-                  ),
-                ],
-              ],
-            ),
-
-            // BIN info
-            if (item.status == ItemStatus.success && item.bin.isNotEmpty)
-              Column(
-                children: [
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: AppColors.slate50,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.slate200),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.warehouse,
-                          size: 20,
-                          color: AppColors.textSecondary,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'BIN LOCATION',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.textSecondary,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                item.bin,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.textPrimary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: () => _showBinLocationSelector(item),
-                          style: TextButton.styleFrom(
-                            backgroundColor: AppColors.primary,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                          ),
-                          child: const Text(
-                            'CHANGE',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              )
-            else if (item.status == ItemStatus.success)
-              Column(
-                children: [
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () => _showBinLocationSelector(item),
-                      icon: const Icon(Icons.warehouse, size: 18),
-                      label: const Text(
-                        'SELECT BIN LOCATION',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showBinLocationSelector(ScannedItem item) async {
-    final selectedBin = await BinLocationModal.show(
-      context: context,
-      currentBin: item.bin,
-    );
-
-    if (selectedBin != null) {
-      setState(() {
-        for (final scannedItem in _scannedItemsMap.values) {
-          scannedItem.bin = selectedBin;
-        }
-      });
-
-      AppModal.showSuccess(
-        context: context,
-        title: 'Bin Updated',
-        message: 'Bin location set to $selectedBin',
-      );
-    }
-  }
-
   Widget _buildBottomBar() {
     return Positioned(
       left: 0,
@@ -1406,7 +1154,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                             context: context,
                             title: 'Saved',
                             message:
-                                '${scannedItems.length} items saved successfully',
+                                '${_allRackTagIds.length} items saved successfully',
                           );
                         }
                       },
@@ -1457,8 +1205,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
   }
 }
 
-enum ItemStatus { success, duplicate, error, pending }
-
 enum ScannerStatus {
   disconnected,
   initializing,
@@ -1469,28 +1215,6 @@ enum ScannerStatus {
 }
 
 enum BasketMode { full, filled, empty }
-
-class ScannedItem {
-  final String id;
-  int quantity;
-  String vendor;
-  String bin;
-  ItemStatus status;
-  final int rssi;
-  String? errorMessage;
-  BasketData? basketData;
-
-  ScannedItem({
-    required this.id,
-    required this.quantity,
-    required this.vendor,
-    required this.bin,
-    required this.status,
-    required this.rssi,
-    this.errorMessage,
-    this.basketData,
-  });
-}
 
 class Rack {
   final int rackNo;

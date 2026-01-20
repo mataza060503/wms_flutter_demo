@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../config/constants/app_colors.dart';
 import '../../screens/former_stock_in_screen.dart';
+import 'package:wms_flutter/models/scanned_item.dart';
 
 class RackDetailModal {
   static Future<void> show({
