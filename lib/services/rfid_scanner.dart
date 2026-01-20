@@ -113,7 +113,7 @@ class RfidScanner {
   /// [uniqueOnly] - If true, only report unique tags (no duplicates in continuous mode)
   Future<bool> startScan({
     ScanMode mode = ScanMode.continuous,
-    bool uniqueOnly = false,
+    bool uniqueOnly = true,
   }) async {
     try {
       final result = await _channel.invokeMethod('startScan', {
@@ -146,10 +146,10 @@ class RfidScanner {
     }
   }
 
-  /// Set the RF power level (1-30)
+  /// Set the RF power level (1-33)
   Future<bool> setPower(int powerLevel) async {
-    if (powerLevel < 1 || powerLevel > 30) {
-      throw ArgumentError('Power level must be between 1 and 30');
+    if (powerLevel < 1 || powerLevel > 33) {
+      throw ArgumentError('Power level must be between 1 and 33');
     }
     try {
       final result = await _channel.invokeMethod('setPower', {
