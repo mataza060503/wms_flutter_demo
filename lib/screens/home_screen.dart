@@ -26,7 +26,16 @@ class HomeScreen extends StatelessWidget {
                 color: AppColors.textPrimary,
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+            _buildQuickActionCard(
+              context,
+              title: 'Former Master Data',
+              subtitle: 'Manage former item information',
+              icon: Icons.inventory_2,
+              color: AppColors.primary,
+              route: AppRouter.formerMasterData,
+            ),
+            const SizedBox(height: 12),
             _buildQuickActionCard(
               context,
               title: 'Former Stock In',

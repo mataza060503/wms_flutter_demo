@@ -28,3 +28,15 @@ class ScannedItem {
     this.basketData,
   });
 }
+
+class Rack {
+  final int rackNo;
+  final DateTime createdAt;
+  final List<ScannedItem> items;
+
+  Rack({
+    required this.rackNo,
+    required this.items,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now();
+}

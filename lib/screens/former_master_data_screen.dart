@@ -1,89 +1,102 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:core';
 import 'package:flutter/material.dart';
 import '../config/constants/app_colors.dart';
-import '../components/common/custom_card.dart';
 import '../components/common/app_modal.dart';
+import '../components/common/rfid_scanned_items_modal.dart';
+import '../components/common/filled_basket_qty_modal.dart';
 import '../components/common/basket_detail_modal.dart';
 import '../components/common/bin_location_modal.dart';
 import '../components/common/rack_detail_modal.dart';
-import '../components/common/filled_basket_qty_modal.dart';
-import '../components/common/rfid_scanned_items_modal.dart';
+import '../components/forms/form_section_card.dart';
+import '../components/forms/form_text_field.dart';
+import '../components/forms/form_dropdown_field.dart';
+import '../components/forms/form_date_field.dart';
 import '../services/rfid_scanner.dart';
 import '../services/api_service.dart';
 import 'package:wms_flutter/models/scanned_item.dart';
 
-class FormerStockInScreen extends StatefulWidget {
-  const FormerStockInScreen({Key? key}) : super(key: key);
+class FormerMasterDataScreen extends StatefulWidget {
+  const FormerMasterDataScreen({Key? key}) : super(key: key);
 
   @override
-  State<FormerStockInScreen> createState() => _FormerStockInScreenState();
+  State<FormerMasterDataScreen> createState() => _FormerMasterDataScreenState();
 }
 
-class _FormerStockInScreenState extends State<FormerStockInScreen> {
-  final RfidScanner _rfidScanner = RfidScanner();
+class _FormerMasterDataScreenState extends State<FormerMasterDataScreen> 
+    with SingleTickerProviderStateMixin {
+  
+  late TabController _tabController;
+  
+  // Form Controllers
+  final _dnController = TextEditingController(text: 'FN00000002');
+  final _itemNoController = TextEditingController(text: 'FNA38122');
+  final _usedDayController = TextEditingController(text: '0');
+  final _purchQtyController = TextEditingController(text: '5');
+  final _aqlController = TextEditingController(text: '1');
+  final _batchNoController = TextEditingController(text: 'FNA381220531');
+  final _lengthController = TextEditingController(text: '380');
+  
+  DateTime _dataDate = DateTime.now();
+  String _selectedBrand = 'Shinko';
+  String _selectedType = 'Ceramic';
+  String _selectedSurface = 'Standard Fine Surface';
+  String _selectedSize = 'S';
 
-  String selectedForm = 'LN25461127UA';
+  // RFID Scanner
+  final RfidScanner _rfidScanner = RfidScanner();
   double rfidPower = 25.0;
-  int selectedPowerLevel = 1;
   bool isScanning = false;
-  bool isInitialized = false;
   bool isConnected = false;
   ScannerStatus scannerStatus = ScannerStatus.disconnected;
   BasketMode _basketMode = BasketMode.full;
-
   int quantity = 0;
 
   final Map<String, ScannedItem> _scannedItemsMap = {};
-  List<ScannedItem> get scannedItems => _scannedItemsMap.values.toList();
-
   StreamSubscription<TagData>? _tagSubscription;
   StreamSubscription<ConnectionStatus>? _statusSubscription;
   StreamSubscription<String>? _errorSubscription;
+
+  final Queue<String> _unfetchedTags = Queue<String>();
+  static const int _maxConcurrentRequests = 50;
+  int _activeRequests = 0;
+  bool _queueRunning = false;
 
   final List<Rack> _racks = [];
   int get currentRackNo => _racks.length + 1;
   final Set<String> _allRackTagIds = {};
 
-  final FocusNode _keyboardFocusNode = FocusNode();
-
-  static const int _maxConcurrentRequests = 50; 
-  int _activeRequests = 0;
-  bool _queueRunning = false;
-
-  // ========== PERFORMANCE OPTIMIZATION ==========
-  // API processing queue
-  final Queue<String> _unfetchedTags = Queue<String>();
-  bool _isProcessingQueue = false;
-  
-  // Stats tracking (updated without rebuilding UI)
   int _totalBaskets = 0;
   int _totalFormers = 0;
-  // ============================================
+  bool _singleTagCaptured = false;
+
+  bool get _isScanTabActive => _tabController.index == 1;
 
   @override
   void initState() {
     super.initState();
-    _keyboardFocusNode.requestFocus();
+    _tabController = TabController(length: 2, vsync: this);
     _initializeRfid();
   }
 
   @override
   void dispose() {
+    _tabController.dispose();
+    _dnController.dispose();
+    _itemNoController.dispose();
+    _usedDayController.dispose();
+    _purchQtyController.dispose();
+    _aqlController.dispose();
+    _batchNoController.dispose();
+    _lengthController.dispose();
+    
     _tagSubscription?.cancel();
     _statusSubscription?.cancel();
     _errorSubscription?.cancel();
     
-    if (isScanning) {
-      _rfidScanner.stopScan();
-    }
-    if (isConnected) {
-      _rfidScanner.disconnect();
-    }
-
-    _keyboardFocusNode.dispose();
-
+    if (isScanning) _rfidScanner.stopScan();
+    if (isConnected) _rfidScanner.disconnect();
+    
     super.dispose();
   }
 
@@ -94,19 +107,14 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       final initSuccess = await _rfidScanner.init();
       if (!initSuccess) {
         setState(() => scannerStatus = ScannerStatus.disconnected);
-        _showError('Initialization Failed', 'Could not initialize RFID scanner');
         return;
       }
 
-      setState(() {
-        isInitialized = true;
-        scannerStatus = ScannerStatus.initialized;
-      });
+      setState(() => scannerStatus = ScannerStatus.initialized);
 
       final connectSuccess = await _rfidScanner.connect();
       if (!connectSuccess) {
         setState(() => scannerStatus = ScannerStatus.disconnected);
-        _showError('Connection Failed', 'Could not connect to RFID scanner');
         return;
       }
 
@@ -117,39 +125,28 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
 
       await _rfidScanner.setPower(_convertPowerToLevel(rfidPower));
 
-      _tagSubscription = _rfidScanner.onTagScanned.listen(
-        _handleTagScanned,
-        onError: (error) => _showError('Scan Error', error.toString()),
-      );
+      _tagSubscription = _rfidScanner.onTagScanned.listen(_handleTagScanned);
+      _statusSubscription = _rfidScanner.onConnectionStatusChange.listen(_handleStatusChange);
+      _errorSubscription = _rfidScanner.onError.listen((error) => _showError('RFID Error', error));
 
-      _statusSubscription = _rfidScanner.onConnectionStatusChange.listen(
-        _handleStatusChange,
-      );
-
-      _errorSubscription = _rfidScanner.onError.listen(
-        (error) => _showError('RFID Error', error),
-      );
-
-      AppModal.showSuccess(
-        context: context,
-        title: 'Connected',
-        message: 'RFID scanner initialized successfully',
-      );
+      if (mounted) {
+        AppModal.showSuccess(
+          context: context,
+          title: 'Connected',
+          message: 'RFID scanner ready',
+        );
+      }
     } catch (e) {
       setState(() => scannerStatus = ScannerStatus.disconnected);
-      _showError('Initialization Error', e.toString());
     }
   }
 
-  bool _singleTagCaptured = false;
-
-  // ========== OPTIMIZED TAG HANDLING ==========
   void _handleTagScanned(TagData tagData) async {
+    if (!_isScanTabActive) return;
+    
     if (_basketMode == BasketMode.filled && _singleTagCaptured) return;
 
     final tagId = tagData.tagId;
-
-    // Skip if already processed
     if (_allRackTagIds.contains(tagId)) return;
     if (_scannedItemsMap.containsKey(tagId)) return;
 
@@ -162,7 +159,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     if (_basketMode == BasketMode.filled) {
       _singleTagCaptured = true;
       await _rfidScanner.stopScan();
-
       setState(() {
         isScanning = false;
         scannerStatus = ScannerStatus.connected;
@@ -170,11 +166,9 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
 
       final selectedQty = await FilledBasketQtyModal.show(context);
       if (selectedQty == null) return;
-
       quantity = selectedQty;
     }
 
-    // Create item with loading state (no UI rebuild)
     final pendingItem = ScannedItem(
       id: tagId,
       quantity: 0,
@@ -184,18 +178,12 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       rssi: tagData.rssi,
     );
 
-    // Add to map without rebuilding UI
     _scannedItemsMap[tagId] = pendingItem;
-    
-    // Update stats counter only
     _updateStats();
-
-    // Queue API fetch (non-blocking)
     _unfetchedTags.add(tagId);
     _processApiQueue();
   }
 
-  // Update stats without full UI rebuild
   void _updateStats() {
     final baskets = _scannedItemsMap.values
         .where((item) => item.status == ItemStatus.success)
@@ -211,16 +199,13 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     }
   }
 
-  // Process API calls in background queue
   void _processApiQueue() {
     if (_queueRunning) return;
     _queueRunning = true;
 
-    while (_activeRequests < _maxConcurrentRequests &&
-          _unfetchedTags.isNotEmpty) {
+    while (_activeRequests < _maxConcurrentRequests && _unfetchedTags.isNotEmpty) {
       final tagId = _unfetchedTags.removeFirst();
       _activeRequests++;
-
       _fetchAndProcessTag(tagId);
     }
 
@@ -230,7 +215,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
   Future<void> _fetchAndProcessTag(String tagId) async {
     try {
       final basketData = await ApiService.getBasketData(tagId);
-
       final existingItem = _scannedItemsMap[tagId];
       if (existingItem == null) return;
 
@@ -255,12 +239,9 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     } finally {
       _activeRequests--;
       _updateStats();
-
-      // Refill the pool
       _processApiQueue();
     }
   }
-  // ============================================
 
   void _handleStatusChange(ConnectionStatus status) {
     switch (status) {
@@ -276,7 +257,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
           isScanning = false;
           scannerStatus = ScannerStatus.disconnected;
         });
-        _showWarning('Disconnected', 'RFID scanner disconnected');
         break;
       case ConnectionStatus.scanStopped:
         setState(() {
@@ -309,12 +289,12 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
         uniqueOnly: true,
       );
 
-      if (!success) return;
-
-      setState(() {
-        isScanning = true;
-        scannerStatus = ScannerStatus.scanning;
-      });
+      if (success) {
+        setState(() {
+          isScanning = true;
+          scannerStatus = ScannerStatus.scanning;
+        });
+      }
     } catch (e) {
       _showError('Start Scan Failed', e.toString());
     }
@@ -350,24 +330,9 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
           _totalBaskets = 0;
           _totalFormers = 0;
         });
-        AppModal.showSuccess(
-          context: context,
-          title: 'Cleared',
-          message: 'All scanned items have been cleared',
-        );
       } catch (e) {
         _showError('Clear Failed', e.toString());
       }
-    }
-  }
-
-  Future<void> _updatePowerLevel(double power) async {
-    setState(() => rfidPower = power);
-    try {
-      final level = _convertPowerToLevel(power);
-      await _rfidScanner.setPower(level);
-    } catch (e) {
-      _showError('Power Update Failed', e.toString());
     }
   }
 
@@ -379,81 +344,9 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     AppModal.showWarning(context: context, title: title, message: message);
   }
 
-  void _updatePowerFromLevel(int level) {
-    setState(() {
-      selectedPowerLevel = level;
-      rfidPower = level == 0 ? 10.0 : level == 1 ? 25.0 : 40.0;
-    });
-    _updatePowerLevel(rfidPower);
-  }
-
-  void _updateLevelFromPower(double power) {
-    int newLevel = power < 17 ? 0 : power < 33 ? 1 : 2;
-    if (newLevel != selectedPowerLevel) {
-      setState(() => selectedPowerLevel = newLevel);
-    }
-  }
-
-  Future<void> _addCurrentScannedToRack() async {
-    if (_scannedItemsMap.isEmpty) {
-      _showWarning('Empty', 'No scanned items to add');
-      return;
-    }
-
-    final confirm = await AppModal.showConfirm(
-      context: context,
-      title: 'Add to Rack',
-      message:
-          'Add ${_scannedItemsMap.length} items to Rack ${currentRackNo}?',
-    );
-
-    if (confirm != true) return;
-
-    setState(() {
-      _racks.add(
-        Rack(
-          rackNo: currentRackNo,
-          items: _scannedItemsMap.values.map((e) => e).toList(),
-        ),
-      );
-
-      _allRackTagIds.addAll(_scannedItemsMap.keys);
-      _scannedItemsMap.clear();
-      _totalBaskets = 0;
-      _totalFormers = 0;
-    });
-
-    AppModal.showSuccess(
-      context: context,
-      title: 'Rack Added',
-      message: 'Items saved successfully to Rack ${currentRackNo - 1}',
-    );
-  }
-
-  Future<void> _handleExit() async {
-    if (_allRackTagIds.isEmpty) {
-      Navigator.pop(context);
-      return;
-    }
-
-    final confirm = await AppModal.showConfirm(
-      context: context,
-      title: 'Unsaved Items',
-      message:
-          'You have ${_allRackTagIds.length} scanned items that are not saved yet.\n\nAre you sure you want to exit?',
-      confirmText: 'EXIT',
-      cancelText: 'CANCEL',
-    );
-
-    if (confirm == true) {
-      Navigator.pop(context);
-    }
-  }
-
-  // Show scanned items modal
   Future<void> _showScannedItemsModal() async {
     if (_scannedItemsMap.isEmpty) {
-      _showWarning('Empty', 'No scanned items to view');
+      _showError('Empty', 'No scanned items to view');
       return;
     }
 
@@ -470,179 +363,351 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     );
   }
 
+  void _saveFormData() {
+    // Collect all form data
+    final formData = {
+      'dn': _dnController.text,
+      'itemNo': _itemNoController.text,
+      'usedDay': _usedDayController.text,
+      'purchQty': _purchQtyController.text,
+      'dataDate': _dataDate.toString(),
+      'brand': _selectedBrand,
+      'type': _selectedType,
+      'surface': _selectedSurface,
+      'size': _selectedSize,
+      'length': _lengthController.text,
+      'aqlLevel': _aqlController.text,
+      'batchNumber': _batchNoController.text,
+      'scannedTags': _scannedItemsMap.length,
+    };
+
+    AppModal.showSuccess(
+      context: context,
+      title: 'Saved',
+      message: 'Former master data saved successfully',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.backgroundLight,
       appBar: _buildAppBar(),
-      body: _buildOptimizedBody(),
-    );
-  }
-
-  // ========== OPTIMIZED LAYOUT (No Item List) ==========
-  Widget _buildOptimizedBody() {
-    return Stack(
-      children: [
-        SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-          child: Column(
-            children: [
-              _buildFormSelector(),
-              const SizedBox(height: 24),
-              _buildBasketModeSelector(),
-              const SizedBox(height: 24),
-              _buildStatsCards(),
-              const SizedBox(height: 24),
-              _buildRFIDPowerCard(),
-              const SizedBox(height: 24),
-              if (isScanning)
-                _buildScanningIndicator(),
-            ],
-          ),
-        ),
-        _buildBottomBar(),
-      ],
-    );
-  }
-
-  Widget _buildScanningIndicator() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: AppColors.primary.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: AppColors.primary.withOpacity(0.3),
-          width: 2,
-        ),
-      ),
-      child: Row(
+      body: Column(
         children: [
-          SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(
-              strokeWidth: 3,
-              valueColor: const AlwaysStoppedAnimation<Color>(
-                AppColors.primary,
-              ),
-            ),
-          ),
-          const SizedBox(width: 16),
+          _buildTabBar(),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: TabBarView(
+              controller: _tabController,
               children: [
-                const Text(
-                  'SCANNING IN PROGRESS',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.primary,
-                    letterSpacing: 1.2,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${_scannedItemsMap.length} items scanned • Tap stats to view',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textSecondary,
-                  ),
-                ),
+                _buildMasterInfoTab(),
+                _buildScanTagTab(),
               ],
             ),
           ),
         ],
       ),
+      bottomNavigationBar: _buildBottomBar(),
     );
   }
-  // ============================================
 
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
-      backgroundColor: Colors.white.withOpacity(0.8),
+      backgroundColor: Colors.white.withOpacity(0.9),
       elevation: 0,
       leading: IconButton(
-        icon: const Icon(Icons.menu, color: AppColors.textSecondary),
+        icon: const Icon(Icons.chevron_left, color: AppColors.textSecondary),
         onPressed: () => Navigator.pop(context),
       ),
-      title: Row(
-        children: [
-          Icon(
-            Icons.login,
-            color: isConnected ? AppColors.success : AppColors.textSecondary,
-          ),
-          const SizedBox(width: 8),
-          const Text(
-            'Former Stock In',
-            style: TextStyle(
-              color: AppColors.textPrimary,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
+      title: const Text(
+        'Former Master Data',
+        style: TextStyle(
+          color: AppColors.textPrimary,
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+        ),
       ),
       actions: [
         IconButton(
-          icon: Icon(
-            isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-            color: isConnected ? AppColors.success : AppColors.error,
-          ),
-          onPressed: () {
-            if (isConnected) {
-              AppModal.showInfo(
-                context: context,
-                title: 'Connected',
-                message: 'RFID scanner is connected and ready',
-              );
-            } else {
-              _initializeRfid();
-            }
-          },
+          icon: const Icon(Icons.history, color: AppColors.textTertiary),
+          onPressed: () {},
         ),
       ],
     );
   }
 
-  Widget _buildFormSelector() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Padding(
-          padding: EdgeInsets.only(left: 4, bottom: 6),
-          child: Text(
-            'CHOOSE STOCKOUT FORM',
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              color: AppColors.textSecondary,
-              letterSpacing: 1.2,
-            ),
-          ),
+  Widget _buildTabBar() {
+    return Container(
+        color: Colors.white,
+        padding: const EdgeInsets.all(12),
+        child: Container(
+        decoration: BoxDecoration(
+            color: AppColors.slate100.withOpacity(0.6),
+            borderRadius: BorderRadius.circular(12),
         ),
-        CustomCard(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          onTap: () {},
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  selectedForm,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary,
-                  ),
+        padding: const EdgeInsets.all(2),
+        child: TabBar(
+            controller: _tabController,
+
+            // ⭐ KEY SETTINGS
+            isScrollable: false,
+            tabAlignment: TabAlignment.fill,
+            indicatorSize: TabBarIndicatorSize.tab,
+
+            indicator: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: [
+                BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 4,
+                offset: const Offset(0, 1),
                 ),
+            ],
+            ),
+            labelColor: AppColors.textPrimary,
+            unselectedLabelColor: AppColors.textSecondary,
+            labelStyle: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w800,
+            ),
+            unselectedLabelStyle: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            ),
+            dividerColor: Colors.transparent,
+            tabs: const [
+            Tab(text: 'Master Info'),
+            Tab(text: 'Scan Tag'),
+            ],
+        ),
+        ),
+    );
+  }
+
+  Widget _buildMasterInfoTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          // Identification Section
+          FormSectionCard(
+            icon: Icons.tag,
+            title: 'IDENTIFICATION',
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: FormTextField(
+                      label: 'DN',
+                      required: true,
+                      controller: _dnController,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FormTextField(
+                      label: 'ITEM NO',
+                      required: true,
+                      controller: _itemNoController,
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.add_circle, color: AppColors.primary),
+                        onPressed: () {},
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              const Icon(Icons.expand_more, color: AppColors.textTertiary),
             ],
           ),
-        ),
-      ],
+          
+          const SizedBox(height: 16),
+          
+          // Tracking & Qty Section
+          FormSectionCard(
+            icon: Icons.analytics,
+            title: 'TRACKING & QTY',
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: FormTextField(
+                      label: 'USED DAY',
+                      required: true,
+                      keyboardType: TextInputType.number,
+                      controller: _usedDayController,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FormTextField(
+                      label: 'PURCH. QTY',
+                      required: true,
+                      keyboardType: TextInputType.number,
+                      controller: _purchQtyController,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              FormDateField(
+                label: 'DATA DATE',
+                required: true,
+                value: _dataDate,
+                onChanged: (date) => setState(() => _dataDate = date),
+              ),
+            ],
+          ),
+          
+          const SizedBox(height: 16),
+          
+          // Specifications Section
+          FormSectionCard(
+            icon: Icons.settings_input_component,
+            title: 'SPECIFICATIONS',
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: FormDropdownField<String>(
+                      label: 'BRAND',
+                      required: true,
+                      value: _selectedBrand,
+                      items: const ['Shinko', 'Brand B'],
+                      itemLabel: (item) => item,
+                      onChanged: (value) => setState(() => _selectedBrand = value!),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FormDropdownField<String>(
+                      label: 'TYPE',
+                      required: true,
+                      value: _selectedType,
+                      items: const ['Ceramic', 'Latex'],
+                      itemLabel: (item) => item,
+                      onChanged: (value) => setState(() => _selectedType = value!),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              FormDropdownField<String>(
+                label: 'SURFACE',
+                required: true,
+                value: _selectedSurface,
+                items: const ['Standard Fine Surface', 'Rough Surface'],
+                itemLabel: (item) => item,
+                onChanged: (value) => setState(() => _selectedSurface = value!),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: FormDropdownField<String>(
+                            label: 'SIZE',
+                            required: true,
+                            value: _selectedSize,
+                            items: const ['S', 'M', 'L', 'XL'],
+                            itemLabel: (item) => item,
+                            onChanged: (value) => setState(() => _selectedSize = value!),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          margin: const EdgeInsets.only(top: 22),
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: AppColors.slate100,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: IconButton(
+                            icon: const Icon(Icons.add, color: AppColors.textSecondary),
+                            onPressed: () {},
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: FormTextField(
+                            label: 'LENGTH',
+                            required: true,
+                            keyboardType: TextInputType.number,
+                            controller: _lengthController,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          margin: const EdgeInsets.only(top: 22),
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: AppColors.slate100,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: IconButton(
+                            icon: const Icon(Icons.add, color: AppColors.textSecondary),
+                            onPressed: () {},
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          
+          const SizedBox(height: 16),
+          
+          // Quality & Batch Section
+          FormSectionCard(
+            icon: Icons.verified,
+            title: 'QUALITY & BATCH',
+            children: [
+              FormTextField(
+                label: 'AQL LEVEL',
+                required: true,
+                keyboardType: TextInputType.number,
+                controller: _aqlController,
+              ),
+              const SizedBox(height: 12),
+              FormTextField(
+                label: 'BATCH NUMBER',
+                required: true,
+                placeholder: 'Enter Batch No',
+                controller: _batchNoController,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildScanTagTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          _buildBasketModeSelector(),
+          const SizedBox(height: 24),
+          _buildStatsCards(),
+          const SizedBox(height: 24),
+          _buildRFIDScannerCard(),
+          const SizedBox(height: 24),
+          if (isScanning) _buildScanningIndicator(),
+        ],
+      ),
     );
   }
 
@@ -654,7 +719,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
         child: GestureDetector(
           onTap: () async {
             setState(() => _basketMode = mode);
-
             if (mode == BasketMode.filled) {
               await _rfidScanner.stopScan();
             }
@@ -680,9 +744,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-                  color: selected
-                      ? AppColors.primary
-                      : AppColors.textSecondary,
+                  color: selected ? AppColors.primary : AppColors.textSecondary,
                 ),
               ),
             ),
@@ -711,21 +773,11 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     return Row(
       children: [
         Expanded(
-          child: _buildStatCard(
-            'BASKETS',
-            _totalBaskets.toString(),
-            AppColors.textPrimary,
-            true, // Make clickable
-          ),
+          child: _buildStatCard('BASKETS', _totalBaskets.toString(), AppColors.textPrimary, true),
         ),
         const SizedBox(width: 12),
         Expanded(
-          child: _buildStatCard(
-            'FORMERS',
-            _totalFormers.toString(),
-            AppColors.primary,
-            true, // Make clickable
-          ),
+          child: _buildStatCard('FORMERS', _totalFormers.toString(), AppColors.primary, true),
         ),
         const SizedBox(width: 12),
         Expanded(
@@ -816,7 +868,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     );
   }
 
-  Widget _buildRFIDPowerCard() {
+  Widget _buildRFIDScannerCard() {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -835,11 +887,9 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
           Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -887,16 +937,11 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                         color: AppColors.primary.withOpacity(0.1),
                         shape: BoxShape.circle,
                       ),
-                      child: const Icon(
-                        Icons.sensors,
-                        color: AppColors.primary,
-                        size: 28,
-                      ),
+                      child: const Icon(Icons.sensors, color: AppColors.primary, size: 28),
                     ),
                   ],
                 ),
                 const SizedBox(height: 20),
-                
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -966,17 +1011,12 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                
                 Row(
                   children: [
                     IconButton(
                       icon: const Icon(Icons.remove, color: AppColors.textTertiary),
                       onPressed: () {
-                        setState(() {
-                          rfidPower = (rfidPower - 1).clamp(0, 50);
-                          _updateLevelFromPower(rfidPower);
-                        });
-                        _updatePowerLevel(rfidPower);
+                        setState(() => rfidPower = (rfidPower - 1).clamp(0, 50));
                       },
                     ),
                     Expanded(
@@ -997,24 +1037,14 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                           value: rfidPower,
                           min: 0,
                           max: 50,
-                          onChanged: (value) {
-                            setState(() {
-                              rfidPower = value;
-                              _updateLevelFromPower(value);
-                            });
-                          },
-                          onChangeEnd: (value) => _updatePowerLevel(value),
+                          onChanged: (value) => setState(() => rfidPower = value),
                         ),
                       ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.add, color: AppColors.textTertiary),
                       onPressed: () {
-                        setState(() {
-                          rfidPower = (rfidPower + 1).clamp(0, 50);
-                          _updateLevelFromPower(rfidPower);
-                        });
-                        _updatePowerLevel(rfidPower);
+                        setState(() => rfidPower = (rfidPower + 1).clamp(0, 50));
                       },
                     ),
                   ],
@@ -1033,6 +1063,88 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                 _buildScanButton(Icons.pause_circle, 'STOP', AppColors.textTertiary, _stopScanning),
                 Container(width: 1, height: 64, color: AppColors.slate100),
                 _buildScanButton(Icons.refresh, 'CLEAR', const Color(0xFFE11D48), _clearScannedItems),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildScanButton(IconData icon, String label, Color color, VoidCallback onTap) {
+    return Expanded(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            height: 64,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: color, size: 24),
+                const SizedBox(height: 4),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textSecondary,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildScanningIndicator() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.primary.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: AppColors.primary.withOpacity(0.3),
+          width: 2,
+        ),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'SCANNING IN PROGRESS',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.primary,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${_scannedItemsMap.length} items scanned • Tap stats to view',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1075,47 +1187,70 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
     }
   }
 
-  Widget _buildScanButton(IconData icon, String label, Color color, VoidCallback onTap) {
-    return Expanded(
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          child: SizedBox(
-            height: 64,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: color, size: 24),
-                const SizedBox(height: 4),
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textSecondary,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-              ],
-            ),
-          ),
+  Future<void> _addCurrentScannedToRack() async {
+    if (_scannedItemsMap.isEmpty) {
+      _showWarning('Empty', 'No scanned items to add');
+      return;
+    }
+
+    final confirm = await AppModal.showConfirm(
+      context: context,
+      title: 'Add to Rack',
+      message:
+          'Add ${_scannedItemsMap.length} items to Rack ${currentRackNo}?',
+    );
+
+    if (confirm != true) return;
+
+    setState(() {
+      _racks.add(
+        Rack(
+          rackNo: currentRackNo,
+          items: _scannedItemsMap.values.map((e) => e).toList(),
         ),
-      ),
+      );
+
+      _allRackTagIds.addAll(_scannedItemsMap.keys);
+      _scannedItemsMap.clear();
+      _totalBaskets = 0;
+      _totalFormers = 0;
+    });
+
+    AppModal.showSuccess(
+      context: context,
+      title: 'Rack Added',
+      message: 'Items saved successfully to Rack ${currentRackNo - 1}',
     );
   }
 
+  Future<void> _handleExit() async {
+    if (_allRackTagIds.isEmpty) {
+      Navigator.pop(context);
+      return;
+    }
+
+    final confirm = await AppModal.showConfirm(
+      context: context,
+      title: 'Unsaved Items',
+      message:
+          'You have ${_allRackTagIds.length} scanned items that are not saved yet.\n\nAre you sure you want to exit?',
+      confirmText: 'EXIT',
+      cancelText: 'CANCEL',
+    );
+
+    if (confirm == true) {
+      Navigator.pop(context);
+    }
+  }
+
   Widget _buildBottomBar() {
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.9),
-          border: const Border(top: BorderSide(color: AppColors.slate200)),
-        ),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.95),
+        border: const Border(top: BorderSide(color: AppColors.slate200)),
+      ),
+      child: SafeArea(
         child: Row(
           children: [
             Expanded(
