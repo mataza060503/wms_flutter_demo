@@ -41,7 +41,14 @@ class _RackDetailContent extends StatefulWidget {
 }
 
 class _RackDetailContentState extends State<_RackDetailContent> {
+  late List<Rack> _racks;
   final Map<int, String> _searchKeywords = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _racks = List.from(widget.racks);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -57,9 +64,9 @@ class _RackDetailContentState extends State<_RackDetailContent> {
             child: ListView.builder(
               controller: widget.scrollController,
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              itemCount: widget.racks.length,
+              itemCount: _racks.length,
               itemBuilder: (context, index) {
-                return _buildRackCard(widget.racks[index]);
+                return _buildRackCard(_racks[index]);
               },
             ),
           ),
@@ -68,9 +75,41 @@ class _RackDetailContentState extends State<_RackDetailContent> {
     );
   }
 
+  void _confirmRemoveRack(Rack rack) async {
+    final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+        title: const Text('Remove Rack'),
+        content: Text(
+            'Are you sure you want to remove Rack ${rack.rackNo.toString().padLeft(2, '0')}?',
+        ),
+        actions: [
+            TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.error,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remove'),
+            ),
+        ],
+        ),
+    );
+
+    if (confirmed == true) {
+        setState(() {
+        _racks.remove(rack);
+        _searchKeywords.remove(rack.rackNo);
+        });
+    }
+  }
+
     Widget _buildHeader(BuildContext context) {
         final totalItems =
-            widget.racks.fold<int>(0, (s, r) => s + r.items.length);
+            _racks.fold<int>(0, (s, r) => s + r.items.length);
 
         return Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
@@ -104,7 +143,7 @@ class _RackDetailContentState extends State<_RackDetailContent> {
                 Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                    '${widget.racks.length} racks • $totalItems items',
+                    '${_racks.length} racks • $totalItems items',
                     style: const TextStyle(
                     fontSize: 12,
                     color: AppColors.textSecondary,
@@ -122,6 +161,8 @@ class _RackDetailContentState extends State<_RackDetailContent> {
             .where((i) => i.id.toLowerCase().contains(keyword.toLowerCase()))
             .toList();
 
+        bool _expanded = false;
+
         return Container(
             margin: const EdgeInsets.only(bottom: 12),
             decoration: BoxDecoration(
@@ -134,28 +175,51 @@ class _RackDetailContentState extends State<_RackDetailContent> {
                 dividerColor: Colors.transparent,
             ),
             child: ExpansionTile(
+                onExpansionChanged: (v) {
+                    setState(() => _expanded = v);
+                },
                 initiallyExpanded: false,
                 tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 childrenPadding: EdgeInsets.zero,
+
                 title: Text(
-                'Rack ${rack.rackNo.toString().padLeft(2, '0')}',
-                style: const TextStyle(
+                    'Rack ${rack.rackNo.toString().padLeft(2, '0')}',
+                    style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w800,
+                    ),
                 ),
-                ),
+
                 subtitle: Text(
-                '${rack.items.length} items',
-                style: const TextStyle(fontSize: 12),
+                    '${rack.items.length} items',
+                    style: const TextStyle(fontSize: 12),
                 ),
+
+                trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                    IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        color: AppColors.error,
+                        tooltip: 'Remove rack',
+                        onPressed: () => _confirmRemoveRack(rack),
+                    ),
+                    AnimatedRotation(
+                        turns: _expanded ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 200),
+                        child: const Icon(Icons.expand_more),
+                    ),
+                    ],
+                ),
+
                 children: [
-                _buildSearch(rack),
-                const SizedBox(height: 8),
-                _buildItemTableHeader(),
-                ...filteredItems.map(_buildItemRow),
-                const SizedBox(height: 12),
+                    _buildSearch(rack),
+                    const SizedBox(height: 8),
+                    _buildItemTableHeader(),
+                    ...filteredItems.map(_buildItemRow),
+                    const SizedBox(height: 12),
                 ],
-            ),
+                ),
             ),
         );
     }

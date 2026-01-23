@@ -1,42 +1,46 @@
 import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/material.dart';
-import '../config/constants/app_colors.dart';
-import '../components/common/app_modal.dart';
-import '../components/common/rfid_scanned_items_modal.dart';
-import '../components/common/filled_basket_qty_modal.dart';
-import '../components/common/basket_detail_modal.dart';
-import '../components/common/bin_location_modal.dart';
-import '../components/common/rack_detail_modal.dart';
-import '../components/forms/form_section_card.dart';
-import '../components/forms/form_text_field.dart';
-import '../components/forms/form_dropdown_field.dart';
-import '../components/forms/form_date_field.dart';
-import '../services/rfid_scanner.dart';
-import '../services/api_service.dart';
+import '../../config/constants/app_colors.dart';
+import '../common/app_modal.dart';
+import '../common/rfid_scanned_items_modal.dart';
+import '../common/filled_basket_qty_modal.dart';
+import '../common/rack_detail_modal.dart';
+import '../../services/rfid_scanner.dart';
+import '../../services/api_service.dart';
 import 'package:wms_flutter/models/scanned_item.dart';
 
-class FormerStockOutScreen extends StatefulWidget {
-  const FormerStockOutScreen({Key? key}) : super(key: key);
-
-  @override
-  State<FormerStockOutScreen> createState() => _FormerStockOutScreenState();
+enum ScannerStatus {
+  disconnected,
+  initializing,
+  initialized,
+  connected,
+  scanning,
+  stopped,
 }
 
-class _FormerStockOutScreenState extends State<FormerStockOutScreen> 
-    with SingleTickerProviderStateMixin {
-  
-  late TabController _tabController;
-  
-  // Form Controllers
-  final _stockFormController = TextEditingController();
-  String _selectedSize = 'L';
-  String _selectedLine = 'A1';
-  String _selectedBrand = 'NBR';
-  String _selectedPlant = 'NBR04';
+enum BasketMode { full, filled, empty }
 
-  // RFID Scanner
-  final RfidScanner _rfidScanner = RfidScanner();
+class RfidScannerComponent extends StatefulWidget {
+  final RfidScanner? rfidScanner;
+  final VoidCallback? onScanComplete;
+
+  const RfidScannerComponent({
+    Key? key,
+    this.rfidScanner,
+    this.onScanComplete,
+  }) : super(key: key);
+
+  @override
+  State<RfidScannerComponent> createState() => RfidScannerComponentState();
+}
+
+class RfidScannerComponentState extends State<RfidScannerComponent>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  late RfidScanner _rfidScanner;
   double rfidPower = 25.0;
   bool isScanning = false;
   bool isConnected = false;
@@ -62,27 +66,37 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
   int _totalFormers = 0;
   bool _singleTagCaptured = false;
 
-  bool get _isScanTabActive => _tabController.index == 1;
-
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _rfidScanner = widget.rfidScanner ?? RfidScanner();
     _initializeRfid();
   }
 
   @override
   void dispose() {
-    _stockFormController.dispose();
-    
     _tagSubscription?.cancel();
     _statusSubscription?.cancel();
     _errorSubscription?.cancel();
     
     if (isScanning) _rfidScanner.stopScan();
-    if (isConnected) _rfidScanner.disconnect();
+    if (widget.rfidScanner == null && isConnected) {
+      _rfidScanner.disconnect();
+    }
     
     super.dispose();
+  }
+
+  void onTabActivated() {
+    // Tab became visible
+    setState(() {});
+  }
+
+  Future<void> onTabDeactivated() async {
+    if (isScanning) {
+      await _rfidScanner.stopScan();
+      isScanning = false;
+    }
   }
 
   Future<void> _initializeRfid() async {
@@ -126,9 +140,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     }
   }
 
-  void _handleTagScanned(TagData tagData) async {
-    if (!_isScanTabActive) return;
-    
+  void _handleTagScanned(TagData tagData) async {    
     if (_basketMode == BasketMode.filled && _singleTagCaptured) return;
 
     final tagId = tagData.tagId;
@@ -229,6 +241,8 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
   }
 
   void _handleStatusChange(ConnectionStatus status) {
+    if (!mounted) return;
+    
     switch (status) {
       case ConnectionStatus.connected:
         setState(() {
@@ -322,10 +336,12 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
   }
 
   void _showError(String title, String message) {
+    if (!mounted) return;
     AppModal.showError(context: context, title: title, message: message);
   }
 
   void _showWarning(String title, String message) {
+    if (!mounted) return;
     AppModal.showWarning(context: context, title: title, message: message);
   }
 
@@ -348,344 +364,70 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     );
   }
 
-  void _saveFormData() {
-    // Collect all form data
-    final formData = {
-      'stockOutForm': _stockFormController.text,
-      'brand': _selectedBrand,
-      'plant': _selectedPlant,
-      'size': _selectedSize,
-      'line': _selectedLine,
-    };
+  Future<void> _addCurrentScannedToRack() async {
+    if (_scannedItemsMap.isEmpty) {
+      _showWarning('Empty', 'No scanned items to add');
+      return;
+    }
+
+    final confirm = await AppModal.showConfirm(
+      context: context,
+      title: 'Add to Rack',
+      message: 'Add ${_scannedItemsMap.length} items to Rack $currentRackNo?',
+    );
+
+    if (confirm != true) return;
+
+    setState(() {
+      _racks.add(
+        Rack(
+          rackNo: currentRackNo,
+          items: _scannedItemsMap.values.toList(),
+        ),
+      );
+
+      _allRackTagIds.addAll(_scannedItemsMap.keys);
+      _scannedItemsMap.clear();
+      _totalBaskets = 0;
+      _totalFormers = 0;
+    });
 
     AppModal.showSuccess(
       context: context,
-      title: 'Saved',
-      message: 'Former master data saved successfully',
+      title: 'Rack Added',
+      message: 'Items saved successfully to Rack ${currentRackNo - 1}',
     );
+  }
+
+  Future<bool> handleExit() async {
+    if (_allRackTagIds.isEmpty) return true;
+
+    final confirm = await AppModal.showConfirm(
+      context: context,
+      title: 'Unsaved Items',
+      message:
+          'You have ${_allRackTagIds.length} scanned items that are not saved yet.\n\nAre you sure you want to exit?',
+      confirmText: 'EXIT',
+      cancelText: 'CANCEL',
+    );
+
+    return confirm == true;
+  }
+
+  Map<String, dynamic> getScanData() {
+    return {
+      'scannedItems': _scannedItemsMap,
+      'racks': _racks,
+      'allRackTagIds': _allRackTagIds,
+      'totalBaskets': _totalBaskets,
+      'totalFormers': _totalFormers,
+    };
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.backgroundLight,
-      appBar: _buildAppBar(),
-      body: Column(
-        children: [
-          _buildTabBar(),
-          Expanded(
-            child: TabBarView(
-              controller: _tabController,
-              children: [
-                _buildMasterInfoTab(),
-                _buildScanTagTab(),
-              ],
-            ),
-          ),
-        ],
-      ),
-      bottomNavigationBar: _buildBottomBar(),
-    );
-  }
-
-  PreferredSizeWidget _buildAppBar() {
-    return AppBar(
-      backgroundColor: Colors.white.withOpacity(0.9),
-      elevation: 0,
-      leading: IconButton(
-        icon: const Icon(Icons.chevron_left, color: AppColors.textSecondary),
-        onPressed: () => Navigator.pop(context),
-      ),
-      title: const Text(
-        'Former Master Data',
-        style: TextStyle(
-          color: AppColors.textPrimary,
-          fontSize: 18,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.history, color: AppColors.textTertiary),
-          onPressed: () {},
-        ),
-      ],
-    );
-  }
-
-  Widget _buildTabBar() {
-    return Container(
-        color: Colors.white,
-        padding: const EdgeInsets.all(12),
-        child: Container(
-        decoration: BoxDecoration(
-            color: AppColors.slate100.withOpacity(0.6),
-            borderRadius: BorderRadius.circular(12),
-        ),
-        padding: const EdgeInsets.all(2),
-        child: TabBar(
-            controller: _tabController,
-
-            // KEY SETTINGS
-            isScrollable: false,
-            tabAlignment: TabAlignment.fill,
-            indicatorSize: TabBarIndicatorSize.tab,
-
-            indicator: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(10),
-            boxShadow: [
-                BoxShadow(
-                color: Colors.black.withOpacity(0.05),
-                blurRadius: 4,
-                offset: const Offset(0, 1),
-                ),
-            ],
-            ),
-            labelColor: AppColors.textPrimary,
-            unselectedLabelColor: AppColors.textSecondary,
-            labelStyle: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w800,
-            ),
-            unselectedLabelStyle: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            ),
-            dividerColor: Colors.transparent,
-            tabs: const [
-            Tab(text: 'Master Info'),
-            Tab(text: 'Scan Tag'),
-            ],
-        ),
-        ),
-    );
-  }
-
-  Widget _buildMasterInfoTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: AppColors.slate200),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.08),
-                  blurRadius: 15,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Branch and Unit Row
-                Row(
-                  children: [
-                    Expanded(
-                      child: FormDropdownField<String>(
-                        label: 'BRANCH',
-                        required: true,
-                        value: _selectedBrand,
-                        items: const ['NBR', 'PVC'],
-                        itemLabel: (item) => item,
-                        onChanged: (value) => setState(() => { _selectedBrand = value! }),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: FormDropdownField<String>(
-                        label: 'PLANT',
-                        required: true,
-                        value: _selectedPlant,
-                        items: const ['NBR01', 'NBR02', 'NBR03', 'NBR04'],
-                        itemLabel: (item) => item,
-                        onChanged: (value) => setState(() => { _selectedPlant = value! }),
-                      ),
-                    ),
-                  ],
-                ),
-                
-                const SizedBox(height: 16),
-                
-                // Stock Form and Size Row
-                Row(
-                  children: [
-                    Expanded(
-                      child: FormTextField(
-                        label: 'STOCK FORM',
-                        required: true,
-                        placeholder: 'Enter form...',
-                        controller: _stockFormController,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: FormDropdownField<String>(
-                        label: 'SIZE',
-                        required: true,
-                        value: _selectedSize,
-                        items: const ['L', 'M', 'S'],
-                        itemLabel: (item) => item,
-                        onChanged: (value) => setState(() => _selectedSize = value!),
-                      ),
-                    ),
-                  ],
-                ),
-                
-                const SizedBox(height: 16),
-                
-                // Line Selection
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4, bottom: 6),
-                      child: Text(
-                        'LINE SELECTION',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.textSecondary,
-                          letterSpacing: 1.0,
-                        ),
-                      ),
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: _buildLineButton('A1'),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _buildLineButton('A2'),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _buildLineButton('B1'),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _buildLineButton('B2'),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Container(
-                          width: 48,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: AppColors.primary,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: IconButton(
-                            icon: const Icon(Icons.search, color: Colors.white),
-                            onPressed: () {},
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                
-                const SizedBox(height: 16),
-                
-                // Create New Form Button
-                Container(
-                  width: double.infinity,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: AppColors.primary.withOpacity(0.3),
-                      width: 2,
-                    ),
-                    borderRadius: BorderRadius.circular(16),
-                    color: AppColors.primary.withOpacity(0.05),
-                  ),
-                  child: TextButton.icon(
-                    onPressed: _generateNewForm,
-                    icon: const Icon(Icons.add, color: AppColors.primary),
-                    label: const Text(
-                      'Create New Form',
-                      style: TextStyle(
-                        color: AppColors.primary,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLineButton(String line) {
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _selectedLine = line;
-        });
-      },
-      child: Container(
-        height: 44,
-        decoration: BoxDecoration(
-          color: _selectedLine == line ? AppColors.primary : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: _selectedLine == line 
-                ? AppColors.primary 
-                : AppColors.slate200,
-          ),
-        ),
-        child: Center(
-          child: Text(
-            line,
-            style: TextStyle(
-              color: _selectedLine == line ? Colors.white : AppColors.primary,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _generateNewForm() {
-    final now = DateTime.now();
-    final yy = now.year.toString().substring(2);
-    final mm = now.month.toString().padLeft(2, '0');
-    final dd = now.day.toString().padLeft(2, '0');
-  
-    const prefix = 'MB';
-
-    final stockForm = '$prefix$yy$mm$dd$_selectedLine'; // Example: MB260122A1
-
-    setState(() {
-      _stockFormController.text = stockForm;
-    });
+    super.build(context);
     
-    // Show success message
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Generated stock form: $stockForm'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-  }
-
-  Widget _buildScanTagTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -776,28 +518,20 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
             'RACK',
             _racks.length.toString().padLeft(1, '0'),
             const Color(0xFFE11D48),
-            false, // Rack modal is separate
+            false,
           ),
         ),
       ],
     );
   }
 
-  Widget _buildStatCard(
-    String label,
-    String value,
-    Color color,
-    bool isClickableForItems,
-  ) {
+  Widget _buildStatCard(String label, String value, Color color, bool isClickableForItems) {
     final isRack = label == 'RACK';
     
     return GestureDetector(
       onTap: isRack
           ? () {
-              RackDetailModal.show(
-                context: context,
-                racks: _racks,
-              );
+              RackDetailModal.show(context: context, racks: _racks);
             }
           : isClickableForItems
               ? _showScannedItemsModal
@@ -828,19 +562,13 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                   style: TextStyle(
                     fontSize: 10,
                     fontWeight: FontWeight.w800,
-                    color: isRack
-                        ? const Color(0xFFE11D48)
-                        : AppColors.textSecondary,
+                    color: isRack ? const Color(0xFFE11D48) : AppColors.textSecondary,
                     letterSpacing: -0.5,
                   ),
                 ),
                 if (isClickableForItems && _scannedItemsMap.isNotEmpty) ...[
                   const SizedBox(width: 4),
-                  Icon(
-                    Icons.visibility,
-                    size: 12,
-                    color: color.withOpacity(0.6),
-                  ),
+                  Icon(Icons.visibility, size: 12, color: color.withOpacity(0.6)),
                 ],
               ],
             ),
@@ -1178,63 +906,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     }
   }
 
-  Future<void> _addCurrentScannedToRack() async {
-    if (_scannedItemsMap.isEmpty) {
-      _showWarning('Empty', 'No scanned items to add');
-      return;
-    }
-
-    final confirm = await AppModal.showConfirm(
-      context: context,
-      title: 'Add to Rack',
-      message:
-          'Add ${_scannedItemsMap.length} items to Rack ${currentRackNo}?',
-    );
-
-    if (confirm != true) return;
-
-    setState(() {
-      _racks.add(
-        Rack(
-          rackNo: currentRackNo,
-          items: _scannedItemsMap.values.map((e) => e).toList(),
-        ),
-      );
-
-      _allRackTagIds.addAll(_scannedItemsMap.keys);
-      _scannedItemsMap.clear();
-      _totalBaskets = 0;
-      _totalFormers = 0;
-    });
-
-    AppModal.showSuccess(
-      context: context,
-      title: 'Rack Added',
-      message: 'Items saved successfully to Rack ${currentRackNo - 1}',
-    );
-  }
-
-  Future<void> _handleExit() async {
-    if (_allRackTagIds.isEmpty) {
-      Navigator.pop(context);
-      return;
-    }
-
-    final confirm = await AppModal.showConfirm(
-      context: context,
-      title: 'Unsaved Items',
-      message:
-          'You have ${_allRackTagIds.length} scanned items that are not saved yet.\n\nAre you sure you want to exit?',
-      confirmText: 'EXIT',
-      cancelText: 'CANCEL',
-    );
-
-    if (confirm == true) {
-      Navigator.pop(context);
-    }
-  }
-
-  Widget _buildBottomBar() {
+  Widget buildBottomBar() {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       decoration: BoxDecoration(
@@ -1276,16 +948,15 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                         final confirm = await AppModal.showConfirm(
                           context: context,
                           title: 'Save All Items',
-                          message:
-                              'Save ${_allRackTagIds.length} scanned items?',
+                          message: 'Save ${_allRackTagIds.length} scanned items?',
                         );
 
                         if (confirm == true) {
+                          widget.onScanComplete?.call();
                           AppModal.showSuccess(
                             context: context,
                             title: 'Saved',
-                            message:
-                                '${_allRackTagIds.length} items saved successfully. branch: $_selectedBrand unit: $_selectedPlant',
+                            message: '${_allRackTagIds.length} items saved successfully',
                           );
                         }
                       },
@@ -1316,7 +987,12 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
               width: 48,
               height: 48,
               child: ElevatedButton(
-                onPressed: _handleExit,
+                onPressed: () async {
+                  final canExit = await handleExit();
+                  if (canExit && mounted) {
+                    Navigator.pop(context);
+                  }
+                },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFFFF1F2),
                   foregroundColor: const Color(0xFFE11D48),
@@ -1335,14 +1011,3 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     );
   }
 }
-
-enum ScannerStatus {
-  disconnected,
-  initializing,
-  initialized,
-  connected,
-  scanning,
-  stopped,
-}
-
-enum BasketMode { full, filled, empty }

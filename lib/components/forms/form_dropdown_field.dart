@@ -37,6 +37,7 @@ class FormDropdownField<T> extends StatelessWidget {
           ),
         ),
         Container(
+          height: 48,
           decoration: BoxDecoration(
             color: AppColors.slate50,
             borderRadius: BorderRadius.circular(12),
