@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math';
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import '../config/constants/app_colors.dart';
 import '../components/common/app_modal.dart';
@@ -8,6 +11,7 @@ import '../components/common/filled_basket_qty_modal.dart';
 import '../components/common/basket_detail_modal.dart';
 import '../components/common/bin_location_modal.dart';
 import '../components/common/rack_detail_modal.dart';
+import '../components/common/stock_out_action_modal.dart';
 import '../components/forms/form_section_card.dart';
 import '../components/forms/form_text_field.dart';
 import '../components/forms/form_dropdown_field.dart';
@@ -24,16 +28,27 @@ class FormerStockOutScreen extends StatefulWidget {
 }
 
 class _FormerStockOutScreenState extends State<FormerStockOutScreen> 
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   
-  late TabController _tabController;
+  TabController? _tabController;
   
-  // Form Controllers
+  // Selected Action
+  StockOutAction? _selectedAction;
+  
+  // Form Controllers - Cascading Dropdowns
+  List<String> _plants = [];
+  List<String> _machines = [];
+  List<String> _lines = [];
+
   final _stockFormController = TextEditingController();
   String _selectedSize = 'L';
-  String _selectedLine = 'A1';
-  String _selectedBrand = 'NBR';
-  String _selectedPlant = 'NBR04';
+  String? _selectedPlant;
+  String? _selectedMachine;
+  String? _selectedLine;
+
+  bool _isLoadingPlants = false;
+  bool _isLoadingMachines = false;
+  bool _isLoadingLines = false;
 
   // RFID Scanner
   final RfidScanner _rfidScanner = RfidScanner();
@@ -62,18 +77,25 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
   int _totalFormers = 0;
   bool _singleTagCaptured = false;
 
-  bool get _isScanTabActive => _tabController.index == 1;
+  bool get _isScanTabActive {
+    if (_selectedAction == StockOutAction.production) {
+      return _tabController?.index == 1;
+    }
+    return true;
+  }
+
+  bool get _showTabBar => _selectedAction == StockOutAction.production;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _initializeRfid();
+    _showActionModal();
   }
 
   @override
   void dispose() {
     _stockFormController.dispose();
+    _tabController?.dispose();
     
     _tagSubscription?.cancel();
     _statusSubscription?.cancel();
@@ -83,6 +105,232 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     if (isConnected) _rfidScanner.disconnect();
     
     super.dispose();
+  }
+
+  void _initializeTabController() {
+    _tabController?.dispose();
+    if (_showTabBar) {
+      _tabController = TabController(length: 2, vsync: this);
+    } else {
+      _tabController = null;
+    }
+  }
+
+  Future<void> _showActionModal() async {
+    await Future.delayed(const Duration(milliseconds: 300));
+    
+    if (!mounted) return;
+    
+    final action = await StockOutActionModal.show(context);
+    
+    if (action == null) {
+      if (mounted) Navigator.pop(context);
+      return;
+    }
+    
+    if (action == StockOutAction.exit) {
+      if (mounted) Navigator.pop(context);
+      return;
+    }
+    
+    setState(() {
+      _selectedAction = action;
+      _initializeTabController();
+    });
+
+    // Load plants only for production mode
+    if (action == StockOutAction.production) {
+      await _loadPlants();
+    } else {
+      _generateStockForm();
+    }
+
+    await _initializeRfid();
+    await _restoreRackCache();
+  }
+
+  Future<void> _changeAction() async {
+    final action = await StockOutActionModal.show(context);
+    
+    if (action == null) return;
+    
+    if (action == StockOutAction.exit) {
+      _handleExit();
+      return;
+    }
+    
+    setState(() {
+      _selectedAction = action;
+      _initializeTabController();
+    });
+
+    // Load plants if switching to production
+    if (action == StockOutAction.production) {
+      await _loadPlants();
+    } else {
+      _generateStockForm();
+    }
+
+    await _restoreRackCache();
+  }
+
+  Future<void> _loadPlants() async {
+    setState(() => _isLoadingPlants = true);
+
+    try {
+      final plants = await ApiService.getPlants();
+      
+      if (!mounted) return;
+
+      setState(() {
+        _plants = plants;
+        _selectedPlant = plants.isNotEmpty ? plants.first : null;
+        _machines.clear();
+        _lines.clear();
+        _selectedMachine = null;
+        _selectedLine = null;
+        _isLoadingPlants = false;
+      });
+
+      // Auto-load machines for first plant
+      if (_selectedPlant != null) {
+        await _loadMachines();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      
+      setState(() => _isLoadingPlants = false);
+      _showError('Load Failed', 'Cannot load plants: ${e.toString()}');
+    }
+  }
+
+  Future<void> _loadMachines() async {
+    if (_selectedPlant == null) return;
+
+    setState(() => _isLoadingMachines = true);
+
+    try {
+      final machines = await ApiService.getMachines(
+        plant: _selectedPlant!,
+        mode: _selectedAction?.name,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _machines = machines;
+        _selectedMachine = machines.isNotEmpty ? machines.first : null;
+        _lines.clear();
+        _selectedLine = null;
+        _isLoadingMachines = false;
+      });
+
+      // Auto-load lines for first machine
+      if (_selectedMachine != null) {
+        await _loadLines();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      
+      setState(() => _isLoadingMachines = false);
+      _showError('Load Failed', 'Cannot load machines: ${e.toString()}');
+    }
+  }
+
+  Future<void> _loadLines() async {
+    if (_selectedMachine == null) return;
+
+    setState(() => _isLoadingLines = true);
+
+    try {
+      final rawLines = await ApiService.getLines(
+        machine: _selectedMachine!,
+      );
+
+      if (!mounted) return;
+
+      /// Remove machine prefix from line
+      final lines = rawLines
+          .map((line) => line.replaceFirst(_selectedMachine!, ''))
+          .toList();
+
+      setState(() {
+        _lines = lines;
+        _selectedLine = lines.isNotEmpty ? lines.first : null;
+        _isLoadingLines = false;
+      });
+
+      // Generate stock form after loading lines
+      _generateStockForm();
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() => _isLoadingLines = false);
+      _showError('Load Failed', 'Cannot load lines: ${e.toString()}');
+    }
+  }
+
+  Future<void> _generateStockForm() async {
+    if (_selectedAction == null) return;
+
+    // Required guards
+    if (_selectedMachine == null) return;
+    if (_selectedLine == null || _selectedLine!.isEmpty) return;
+    if (_selectedSize == null || _selectedSize!.isEmpty) return;
+
+    try {
+      final formName = await ApiService.getStockForm(
+        machine: _selectedMachine!,
+        lineName: _selectedLine!,
+        sizeNameInput: _selectedSize!,
+        stockType: _selectedAction == StockOutAction.production ? 1 : 2,
+        buttonMode: _selectedAction == StockOutAction.production ? 1 : 2,
+        callByButton: 1,
+      );
+
+      if (!mounted) return;
+
+      if (formName != null && formName.isNotEmpty) {
+        setState(() {
+          _stockFormController.text = formName;
+        });
+      } else {
+        _generateStockFormFallback();
+      }
+    } catch (e) {
+      debugPrint('Stock form API failed, fallback used: $e');
+      _generateStockFormFallback();
+    }
+  }
+
+  void _generateStockFormFallback() {
+    final now = DateTime.now();
+    final yy = now.year.toString().substring(2);
+    final mm = now.month.toString().padLeft(2, '0');
+    final dd = now.day.toString().padLeft(2, '0');
+
+    String stockForm;
+
+    if (_selectedAction == StockOutAction.production) {
+      stockForm = 'MB$yy$mm$dd${_selectedLine ?? ''}';
+    } else {
+      final prefix =
+          _selectedAction == StockOutAction.washing ? 'CL' : 'LK';
+
+      final random = Random();
+      final randomDigits =
+          random.nextInt(100).toString().padLeft(2, '0');
+      final randomChars = String.fromCharCodes([
+        65 + random.nextInt(26),
+        65 + random.nextInt(26),
+      ]);
+
+      stockForm = '$prefix$yy$randomDigits$mm$dd$randomChars';
+    }
+
+    setState(() {
+      _stockFormController.text = stockForm;
+    });
   }
 
   Future<void> _initializeRfid() async {
@@ -199,7 +447,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
 
   Future<void> _fetchAndProcessTag(String tagId) async {
     try {
-      final basketData = await ApiService.getBasketData(tagId);
+      final basketData = await ApiService.getStockOutBasketData(tagId);
       final existingItem = _scannedItemsMap[tagId];
       if (existingItem == null) return;
 
@@ -348,34 +596,24 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     );
   }
 
-  void _saveFormData() {
-    // Collect all form data
-    final formData = {
-      'stockOutForm': _stockFormController.text,
-      'brand': _selectedBrand,
-      'plant': _selectedPlant,
-      'size': _selectedSize,
-      'line': _selectedLine,
-    };
-
-    AppModal.showSuccess(
-      context: context,
-      title: 'Saved',
-      message: 'Former master data saved successfully',
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.backgroundLight,
       appBar: _buildAppBar(),
-      body: Column(
+      body: _buildBody(),
+      bottomNavigationBar: _buildBottomBar(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_showTabBar && _tabController != null) {
+      return Column(
         children: [
           _buildTabBar(),
           Expanded(
             child: TabBarView(
-              controller: _tabController,
+              controller: _tabController!,
               children: [
                 _buildMasterInfoTab(),
                 _buildScanTagTab(),
@@ -383,9 +621,10 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
             ),
           ),
         ],
-      ),
-      bottomNavigationBar: _buildBottomBar(),
-    );
+      );
+    }
+
+    return _buildSimpleScanTab();
   }
 
   PreferredSizeWidget _buildAppBar() {
@@ -396,19 +635,78 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
         icon: const Icon(Icons.chevron_left, color: AppColors.textSecondary),
         onPressed: () => Navigator.pop(context),
       ),
-      title: const Text(
-        'Former Master Data',
-        style: TextStyle(
-          color: AppColors.textPrimary,
-          fontSize: 18,
-          fontWeight: FontWeight.w700,
-        ),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Former Stock Out',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (_selectedAction != null)
+            Row(
+              children: [
+                Icon(
+                  _selectedAction!.icon,
+                  size: 12,
+                  color: _selectedAction!.color,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  _selectedAction!.displayName,
+                  style: TextStyle(
+                    color: _selectedAction!.color,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+        ],
       ),
       actions: [
-        IconButton(
-          icon: const Icon(Icons.history, color: AppColors.textTertiary),
-          onPressed: () {},
-        ),
+        if (_selectedAction != null)
+          Container(
+            margin: const EdgeInsets.only(right: 12),
+            child: Material(
+              color: _selectedAction!.color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                onTap: _changeAction,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _selectedAction!.icon,
+                        size: 18,
+                        color: _selectedAction!.color,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        _selectedAction!.displayName,
+                        style: TextStyle(
+                          color: _selectedAction!.color,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 16,
+                        color: _selectedAction!.color,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -425,12 +723,9 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
         padding: const EdgeInsets.all(2),
         child: TabBar(
             controller: _tabController,
-
-            // KEY SETTINGS
             isScrollable: false,
             tabAlignment: TabAlignment.fill,
             indicatorSize: TabBarIndicatorSize.tab,
-
             indicator: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(10),
@@ -484,29 +779,53 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Branch and Unit Row
+                // Plant and Machine Row
                 Row(
                   children: [
                     Expanded(
-                      child: FormDropdownField<String>(
-                        label: 'BRANCH',
-                        required: true,
-                        value: _selectedBrand,
-                        items: const ['NBR', 'PVC'],
-                        itemLabel: (item) => item,
-                        onChanged: (value) => setState(() => { _selectedBrand = value! }),
-                      ),
+                      child: _isLoadingPlants
+                          ? _buildLoadingDropdown('PLANT')
+                          : FormDropdownField<String>(
+                              label: 'PLANT',
+                              required: true,
+                              value: _selectedPlant,
+                              items: _plants,
+                              itemLabel: (item) => item,
+                              onChanged: (value) async {
+                                setState(() {
+                                  _selectedPlant = value;
+                                  _machines.clear();
+                                  _lines.clear();
+                                  _selectedMachine = null;
+                                  _selectedLine = null;
+                                });
+                                if (value != null) {
+                                  await _loadMachines();
+                                }
+                              },
+                            ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: FormDropdownField<String>(
-                        label: 'PLANT',
-                        required: true,
-                        value: _selectedPlant,
-                        items: const ['NBR01', 'NBR02', 'NBR03', 'NBR04'],
-                        itemLabel: (item) => item,
-                        onChanged: (value) => setState(() => { _selectedPlant = value! }),
-                      ),
+                      child: _isLoadingMachines
+                          ? _buildLoadingDropdown('MACHINE')
+                          : FormDropdownField<String>(
+                              label: 'MACHINE',
+                              required: true,
+                              value: _selectedMachine,
+                              items: _machines,
+                              itemLabel: (item) => item,
+                              onChanged: (value) async {
+                                setState(() {
+                                  _selectedMachine = value;
+                                  _lines.clear();
+                                  _selectedLine = null;
+                                });
+                                if (value != null) {
+                                  await _loadLines();
+                                }
+                              },
+                            ),
                     ),
                   ],
                 ),
@@ -520,7 +839,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                       child: FormTextField(
                         label: 'STOCK FORM',
                         required: true,
-                        placeholder: 'Enter form...',
+                        placeholder: 'Auto-generated...',
                         controller: _stockFormController,
                       ),
                     ),
@@ -541,65 +860,86 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                 const SizedBox(height: 16),
                 
                 // Line Selection
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4, bottom: 6),
-                      child: Text(
-                        'LINE SELECTION',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.textSecondary,
-                          letterSpacing: 1.0,
+                if (_isLoadingLines)
+                  _buildLoadingLines()
+                else if (_lines.isNotEmpty)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(left: 4, bottom: 6),
+                        child: Text(
+                          'LINE SELECTION',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textSecondary,
+                            letterSpacing: 1.0,
+                          ),
                         ),
                       ),
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: _buildLineButton('A1'),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _buildLineButton('A2'),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _buildLineButton('B1'),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _buildLineButton('B2'),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Container(
-                          width: 48,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: AppColors.primary,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: IconButton(
-                            icon: const Icon(Icons.search, color: Colors.white),
-                            onPressed: () {},
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          const spacing = 8.0;
+
+                          // number of items shown
+                          final count = _lines.length;
+
+                          // dynamic columns: max 4
+                          final columns = count >= 4 ? 4 : count;
+
+                          final itemWidth =
+                              (constraints.maxWidth - spacing * (columns - 1)) / columns;
+
+                          return Wrap(
+                            spacing: spacing,
+                            runSpacing: spacing,
+                            alignment: WrapAlignment.center,
+                            children: _lines.map((line) {
+                              final selected = _selectedLine == line;
+
+                              return SizedBox(
+                                width: itemWidth,
+                                child: GestureDetector(
+                                  onTap: () {
+                                    setState(() {
+                                      _selectedLine = line;
+                                      _generateStockForm();
+                                    });
+                                  },
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 200),
+                                    padding: const EdgeInsets.symmetric(vertical: 12),
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      color: selected ? AppColors.primary : Colors.white,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: selected ? AppColors.primary : AppColors.slate200,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      line,
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: selected ? Colors.white : AppColors.primary,
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
                 
                 const SizedBox(height: 16),
                 
-                // Create New Form Button
+                // Regenerate Button
                 Container(
                   width: double.infinity,
                   height: 48,
@@ -612,10 +952,10 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                     color: AppColors.primary.withOpacity(0.05),
                   ),
                   child: TextButton.icon(
-                    onPressed: _generateNewForm,
-                    icon: const Icon(Icons.add, color: AppColors.primary),
+                    onPressed: _generateStockForm,
+                    icon: const Icon(Icons.refresh, color: AppColors.primary),
                     label: const Text(
-                      'Create New Form',
+                      'Regenerate Form',
                       style: TextStyle(
                         color: AppColors.primary,
                         fontWeight: FontWeight.w700,
@@ -631,56 +971,145 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     );
   }
 
-  Widget _buildLineButton(String line) {
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _selectedLine = line;
-        });
-      },
-      child: Container(
-        height: 44,
-        decoration: BoxDecoration(
-          color: _selectedLine == line ? AppColors.primary : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: _selectedLine == line 
-                ? AppColors.primary 
-                : AppColors.slate200,
-          ),
-        ),
-        child: Center(
+  Widget _buildLoadingDropdown(String label) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 6),
           child: Text(
-            line,
-            style: TextStyle(
-              color: _selectedLine == line ? Colors.white : AppColors.primary,
+            '$label*',
+            style: const TextStyle(
+              fontSize: 11,
               fontWeight: FontWeight.w700,
+              color: AppColors.textSecondary,
+              letterSpacing: 1.0,
             ),
           ),
         ),
-      ),
+        Container(
+          height: 48,
+          decoration: BoxDecoration(
+            color: AppColors.slate50,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.slate200),
+          ),
+          child: const Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
-  void _generateNewForm() {
-    final now = DateTime.now();
-    final yy = now.year.toString().substring(2);
-    final mm = now.month.toString().padLeft(2, '0');
-    final dd = now.day.toString().padLeft(2, '0');
-  
-    const prefix = 'MB';
+  Widget _buildLoadingLines() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 6),
+          child: Text(
+            'LINE SELECTION',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textSecondary,
+              letterSpacing: 1.0,
+            ),
+          ),
+        ),
+        Container(
+          height: 48,
+          decoration: BoxDecoration(
+            color: AppColors.slate50,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.slate200),
+          ),
+          child: const Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
-    final stockForm = '$prefix$yy$mm$dd$_selectedLine'; // Example: MB260122A1
-
-    setState(() {
-      _stockFormController.text = stockForm;
-    });
-    
-    // Show success message
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Generated stock form: $stockForm'),
-        duration: const Duration(seconds: 2),
+  Widget _buildSimpleScanTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: AppColors.slate200),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 15,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                FormTextField(
+                  label: 'STOCK FORM',
+                  required: true,
+                  placeholder: 'Auto-generated form...',
+                  controller: _stockFormController,
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: AppColors.primary.withOpacity(0.3),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    color: AppColors.primary.withOpacity(0.05),
+                  ),
+                  child: TextButton.icon(
+                    onPressed: _generateStockForm,
+                    icon: const Icon(Icons.refresh, color: AppColors.primary),
+                    label: const Text(
+                      'Regenerate Form',
+                      style: TextStyle(
+                        color: AppColors.primary,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          _buildBasketModeSelector(),
+          const SizedBox(height: 24),
+          _buildStatsCards(),
+          const SizedBox(height: 24),
+          _buildRFIDScannerCard(),
+          const SizedBox(height: 24),
+          if (isScanning) _buildScanningIndicator(),
+        ],
       ),
     );
   }
@@ -774,9 +1203,9 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
         Expanded(
           child: _buildStatCard(
             'RACK',
-            _racks.length.toString().padLeft(1, '0'),
+            _racks.length.toString(),
             const Color(0xFFE11D48),
-            false, // Rack modal is separate
+            false,
           ),
         ),
       ],
@@ -797,6 +1226,21 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
               RackDetailModal.show(
                 context: context,
                 racks: _racks,
+                onChanged: (updatedRacks) async {
+                  setState(() {
+                    _racks
+                      ..clear()
+                      ..addAll(updatedRacks);
+
+                    _allRackTagIds
+                      ..clear()
+                      ..addAll(
+                        updatedRacks.expand((r) => r.items.map((e) => e.id)),
+                      );
+                  });
+
+                  await _saveRackCache();
+                },
               );
             }
           : isClickableForItems
@@ -1178,6 +1622,57 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     }
   }
 
+  String get _rackCacheKey {
+    final action = _selectedAction?.name ?? 'unknown';
+    return 'stockout_${action}_rack_temp';
+  }
+
+  Future<void> _saveRackCache() async {
+    if (_selectedAction == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+
+    final data = {
+      'racks': _racks.map((e) => e.toJson()).toList(),
+      'allRackTagIds': _allRackTagIds.toList(),
+    };
+
+    await prefs.setString(_rackCacheKey, jsonEncode(data));
+  }
+
+  Future<void> _restoreRackCache() async {
+    if (_selectedAction == null) return;
+
+    setState(() {
+      _racks.clear();
+      _allRackTagIds.clear();
+    });
+
+    final prefs = await SharedPreferences.getInstance();
+
+    print('Restoring rack cache with key: $_rackCacheKey');
+
+    final raw = prefs.getString(_rackCacheKey);
+    if (raw == null) return;
+
+    final decoded = jsonDecode(raw) as Map<String, dynamic>;
+
+    final restoredRacks = (decoded['racks'] as List)
+        .map((e) => Rack.fromJson(e))
+        .toList();
+
+    final restoredTagIds = Set<String>.from(
+      decoded['allRackTagIds'] ?? const [],
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _racks.addAll(restoredRacks);
+      _allRackTagIds.addAll(restoredTagIds);
+    });
+  }
+
   Future<void> _addCurrentScannedToRack() async {
     if (_scannedItemsMap.isEmpty) {
       _showWarning('Empty', 'No scanned items to add');
@@ -1187,8 +1682,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     final confirm = await AppModal.showConfirm(
       context: context,
       title: 'Add to Rack',
-      message:
-          'Add ${_scannedItemsMap.length} items to Rack ${currentRackNo}?',
+      message: 'Add ${_scannedItemsMap.length} items to Rack ${currentRackNo}?',
     );
 
     if (confirm != true) return;
@@ -1207,6 +1701,8 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
       _totalFormers = 0;
     });
 
+    await _saveRackCache();
+
     AppModal.showSuccess(
       context: context,
       title: 'Rack Added',
@@ -1223,8 +1719,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     final confirm = await AppModal.showConfirm(
       context: context,
       title: 'Unsaved Items',
-      message:
-          'You have ${_allRackTagIds.length} scanned items that are not saved yet.\n\nAre you sure you want to exit?',
+      message: 'You have ${_allRackTagIds.length} scanned items that are not saved yet.\n\nAre you sure you want to exit?',
       confirmText: 'EXIT',
       cancelText: 'CANCEL',
     );
@@ -1276,16 +1771,19 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                         final confirm = await AppModal.showConfirm(
                           context: context,
                           title: 'Save All Items',
-                          message:
-                              'Save ${_allRackTagIds.length} scanned items?',
+                          message: 'Save ${_allRackTagIds.length} scanned items?',
                         );
 
                         if (confirm == true) {
+                          String details = '';
+                          if (_selectedAction == StockOutAction.production) {
+                            details = 'Plant: $_selectedPlant, Machine: $_selectedMachine, Line: $_selectedLine';
+                          }
+                          
                           AppModal.showSuccess(
                             context: context,
                             title: 'Saved',
-                            message:
-                                '${_allRackTagIds.length} items saved successfully. branch: $_selectedBrand unit: $_selectedPlant',
+                            message: '${_allRackTagIds.length} items saved successfully${details.isNotEmpty ? '\n$details' : ''}',
                           );
                         }
                       },

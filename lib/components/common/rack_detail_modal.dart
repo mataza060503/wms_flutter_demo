@@ -7,6 +7,7 @@ class RackDetailModal {
   static Future<void> show({
     required BuildContext context,
     required List<Rack> racks,
+    ValueChanged<List<Rack>> ? onChanged,
   }) {
     return showModalBottomSheet(
       context: context,
@@ -20,6 +21,7 @@ class RackDetailModal {
           return _RackDetailContent(
             racks: racks,
             scrollController: controller,
+            onChanged: onChanged,
           );
         },
       ),
@@ -30,10 +32,12 @@ class RackDetailModal {
 class _RackDetailContent extends StatefulWidget {
   final List<Rack> racks;
   final ScrollController scrollController;
+  final ValueChanged<List<Rack>>? onChanged;
 
   const _RackDetailContent({
     required this.racks,
     required this.scrollController,
+    this.onChanged,
   });
 
   @override
@@ -93,7 +97,7 @@ class _RackDetailContentState extends State<_RackDetailContent> {
                 backgroundColor: AppColors.error,
             ),
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Remove'),
+            child: const Text('Remove', style: TextStyle(color: Colors.white)),
             ),
         ],
         ),
@@ -104,6 +108,8 @@ class _RackDetailContentState extends State<_RackDetailContent> {
         _racks.remove(rack);
         _searchKeywords.remove(rack.rackNo);
         });
+
+        widget.onChanged?.call(List.from(_racks));
     }
   }
 

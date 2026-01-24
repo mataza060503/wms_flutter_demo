@@ -127,7 +127,8 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
 
   Widget _buildHeader() {
     final totalBaskets = successItems.length;
-    final totalFormers = allItems.fold<int>(0, (sum, item) => sum + item.quantity);
+    final totalFormers =
+        allItems.fold<int>(0, (sum, item) => sum + item.quantity);
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -137,62 +138,75 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
         border: Border(bottom: BorderSide(color: AppColors.slate200)),
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 40,
-            height: 4,
-            margin: const EdgeInsets.only(bottom: 16),
-            decoration: BoxDecoration(
-              color: AppColors.slate300,
-              borderRadius: BorderRadius.circular(2),
+          /// Drag handle
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 8),
+              decoration: BoxDecoration(
+                color: AppColors.slate300,
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
           ),
+
+          /// ===== ROW 1: TITLE + TOTAL (ONE ROW) =====
+          Row(
+            children: [
+              const Text(
+                'SCANNED ITEMS',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              // const Spacer(),
+              // IconButton(
+              //   icon: const Icon(Icons.close),
+              //   onPressed: () => Navigator.pop(context),
+              //   style: IconButton.styleFrom(
+              //     backgroundColor: AppColors.slate100,
+              //     foregroundColor: AppColors.textSecondary,
+              //   ),
+              // ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+
+          /// ===== ROW 2: FULL-WIDTH EXPANDING STATS =====
           Row(
             children: [
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'SCANNED ITEMS',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.textSecondary,
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '${allItems.length} items',
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w900,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                  ],
+                child: _buildMiniStatChip(
+                  'BASKETS',
+                  totalBaskets.toString(),
+                  AppColors.success,
                 ),
               ),
-              Row(
-                children: [
-                  _buildMiniStatChip('BASKETS', totalBaskets.toString(), AppColors.success),
-                  const SizedBox(width: 8),
-                  _buildMiniStatChip('FORMERS', totalFormers.toString(), AppColors.primary),
-                  const SizedBox(width: 8),
-                  if (errorItems.isNotEmpty)
-                    _buildMiniStatChip('ERRORS', errorItems.length.toString(), AppColors.error),
-                ],
-              ),
-              const SizedBox(width: 12),
-              IconButton(
-                icon: const Icon(Icons.close),
-                onPressed: () => Navigator.pop(context),
-                style: IconButton.styleFrom(
-                  backgroundColor: AppColors.slate100,
-                  foregroundColor: AppColors.textSecondary,
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildMiniStatChip(
+                  'FORMERS',
+                  totalFormers.toString(),
+                  AppColors.primary,
                 ),
               ),
+              if (errorItems.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildMiniStatChip(
+                    'ERRORS',
+                    errorItems.length.toString(),
+                    AppColors.error,
+                  ),
+                ),
+              ],
             ],
           ),
         ],

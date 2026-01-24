@@ -21,6 +21,13 @@ class FormDropdownField<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    /// 1️⃣ Remove duplicates
+    final List<T> uniqueItems = items.toSet().toList();
+
+    /// 2️⃣ Ensure value exists in items
+    final T? safeValue =
+        uniqueItems.contains(value) ? value : null;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -45,10 +52,10 @@ class FormDropdownField<T> extends StatelessWidget {
           ),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<T>(
-              value: value,
+              value: safeValue,
               isExpanded: true,
-              onChanged: onChanged,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              onChanged: onChanged, // optional ✅
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               icon: const Icon(
                 Icons.expand_more,
                 color: AppColors.textTertiary,
@@ -60,7 +67,7 @@ class FormDropdownField<T> extends StatelessWidget {
               ),
               dropdownColor: Colors.white,
               borderRadius: BorderRadius.circular(12),
-              items: items.map((T item) {
+              items: uniqueItems.map((T item) {
                 return DropdownMenuItem<T>(
                   value: item,
                   child: Text(itemLabel(item)),
