@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/rfid_scanner.dart';
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'package:wms_flutter/components/base/app_scaffold.dart';
 
 class RfidTestScreen extends StatefulWidget {
   const RfidTestScreen({super.key});
@@ -108,11 +109,10 @@ class _RfidTestScreenState extends State<RfidTestScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('RFID Scanner Test'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-      ),
+    return AppScaffold(
+      title: 'RFID Test',
+      showBottomNav: true,
+      currentNavIndex: 3,
       body: Column(
         children: [
           Padding(

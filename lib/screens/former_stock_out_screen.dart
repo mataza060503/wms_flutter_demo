@@ -4,24 +4,24 @@ import 'dart:math';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
-import '../config/constants/app_colors.dart';
-import '../components/common/app_modal.dart';
-import '../components/common/rfid_scanned_items_modal.dart';
-import '../components/common/filled_basket_qty_modal.dart';
-import '../components/common/basket_detail_modal.dart';
-import '../components/common/bin_location_modal.dart';
-import '../components/common/rack_detail_modal.dart';
-import '../components/common/stock_out_action_modal.dart';
-import '../components/forms/form_section_card.dart';
-import '../components/forms/form_text_field.dart';
-import '../components/forms/form_dropdown_field.dart';
-import '../components/forms/form_date_field.dart';
-import '../services/rfid_scanner.dart';
-import '../services/api_service.dart';
+import 'package:wms_flutter/config/constants/app_colors.dart';
+import 'package:wms_flutter/components/common/app_modal.dart';
+import 'package:wms_flutter/components/common/rfid_scanned_items_modal.dart';
+import 'package:wms_flutter/components/common/filled_basket_qty_modal.dart';
+import 'package:wms_flutter/components/common/basket_detail_modal.dart';
+import 'package:wms_flutter/components/common/bin_location_modal.dart';
+import 'package:wms_flutter/components/common/rack_detail_modal.dart';
+import 'package:wms_flutter/components/common/stock_out_action_modal.dart';
+import 'package:wms_flutter/components/forms/form_section_card.dart';
+import 'package:wms_flutter/components/forms/form_text_field.dart';
+import 'package:wms_flutter/components/forms/form_dropdown_field.dart';
+import 'package:wms_flutter/components/forms/form_date_field.dart';
+import 'package:wms_flutter/services/rfid_scanner.dart';
+import 'package:wms_flutter/services/api_service.dart';
 import 'package:wms_flutter/models/scanned_item.dart';
 
 class FormerStockOutScreen extends StatefulWidget {
-  const FormerStockOutScreen({Key? key}) : super(key: key);
+  const FormerStockOutScreen({super.key});
 
   @override
   State<FormerStockOutScreen> createState() => _FormerStockOutScreenState();
@@ -951,9 +951,15 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                     borderRadius: BorderRadius.circular(16),
                     color: AppColors.primary.withOpacity(0.05),
                   ),
+                  clipBehavior: Clip.hardEdge,
                   child: TextButton.icon(
                     onPressed: _generateStockForm,
                     icon: const Icon(Icons.refresh, color: AppColors.primary),
+                    style: TextButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
                     label: const Text(
                       'Regenerate Form',
                       style: TextStyle(
@@ -1703,11 +1709,13 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
 
     await _saveRackCache();
 
-    AppModal.showSuccess(
-      context: context,
-      title: 'Rack Added',
-      message: 'Items saved successfully to Rack ${currentRackNo - 1}',
-    );
+    if (mounted) {
+      AppModal.showSuccess(
+        context: context,
+        title: 'Rack Added',
+        message: 'Items saved successfully to Rack ${currentRackNo - 1}',
+      );
+    }
   }
 
   Future<void> _handleExit() async {
@@ -1779,12 +1787,14 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
                           if (_selectedAction == StockOutAction.production) {
                             details = 'Plant: $_selectedPlant, Machine: $_selectedMachine, Line: $_selectedLine';
                           }
-                          
-                          AppModal.showSuccess(
-                            context: context,
-                            title: 'Saved',
-                            message: '${_allRackTagIds.length} items saved successfully${details.isNotEmpty ? '\n$details' : ''}',
-                          );
+
+                          if (mounted) {
+                            AppModal.showSuccess(
+                              context: context,
+                              title: 'Saved',
+                              message: '${_allRackTagIds.length} items saved successfully${details.isNotEmpty ? '\n$details' : ''}',
+                            );
+                          }
                         }
                       },
                 icon: const Icon(Icons.save, size: 20),
@@ -1833,14 +1843,3 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
     );
   }
 }
-
-enum ScannerStatus {
-  disconnected,
-  initializing,
-  initialized,
-  connected,
-  scanning,
-  stopped,
-}
-
-enum BasketMode { full, filled, empty }

@@ -1,9 +1,12 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../config/constants/app_colors.dart';
 import './basket_detail_modal.dart';
 import './bin_location_modal.dart';
 import './app_modal.dart';
-import '../../services/api_service.dart';
+import 'package:wms_flutter/services/api_service.dart';
 import 'package:wms_flutter/models/scanned_item.dart';
 
 class RfidScannedItemsModal extends StatefulWidget {
@@ -38,24 +41,26 @@ class RfidScannedItemsModal extends StatefulWidget {
 
 class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  
+
   // Pagination
   final int _itemsPerPage = 20;
   int _currentSuccessPage = 0;
   int _currentErrorPage = 0;
 
+  bool _isDownloading = false;
+
   List<ScannedItem> get allItems => widget.scannedItemsMap.values.toList();
-  
+
   List<ScannedItem> get successItems => allItems
       .where((item) => item.status == ItemStatus.success)
       .toList();
-  
+
   List<ScannedItem> get errorItems => allItems
-      .where((item) => 
-          item.status == ItemStatus.error || 
-          item.status == ItemStatus.duplicate)
+      .where((item) =>
+  item.status == ItemStatus.error ||
+      item.status == ItemStatus.duplicate)
       .toList();
-  
+
   List<ScannedItem> get pendingItems => allItems
       .where((item) => item.status == ItemStatus.pending)
       .toList();
@@ -93,6 +98,115 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
     super.dispose();
   }
 
+  Future<void> _downloadTagIds() async {
+    if (allItems.isEmpty) {
+      AppModal.showWarning(
+        context: context,
+        title: 'No Data',
+        message: 'No scanned items to download',
+      );
+      return;
+    }
+
+    setState(() => _isDownloading = true);
+
+    try {
+      // 1. Generate content Buffer
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').split('.')[0];
+      final fileName = 'scanned_tags_$timestamp.txt';
+
+      final buffer = StringBuffer();
+      buffer.writeln('Scanned Tag IDs Report');
+      buffer.writeln('Generated: ${DateTime.now().toString()}');
+      buffer.writeln('Total Items: ${allItems.length}');
+      buffer.writeln('Success: ${successItems.length}');
+      buffer.writeln('Errors: ${errorItems.length}');
+      buffer.writeln('Pending: ${pendingItems.length}');
+      buffer.writeln('');
+      buffer.writeln('=' * 50);
+      buffer.writeln('');
+
+      if (successItems.isNotEmpty) {
+        buffer.writeln('SUCCESS ITEMS (${successItems.length}):');
+        buffer.writeln('-' * 50);
+        for (var item in successItems) {
+          buffer.writeln('Tag ID: ${item.id}');
+          buffer.writeln('  Quantity: ${item.quantity}');
+          if (item.vendor.isNotEmpty) buffer.writeln('  Vendor: ${item.vendor}');
+          if (item.bin.isNotEmpty) buffer.writeln('  Bin: ${item.bin}');
+          buffer.writeln('');
+        }
+      }
+
+      if (errorItems.isNotEmpty) {
+        buffer.writeln('ERROR ITEMS (${errorItems.length}):');
+        buffer.writeln('-' * 50);
+        for (var item in errorItems) {
+          buffer.writeln('Tag ID: ${item.id}');
+          buffer.writeln('  Status: ${item.status.toString()}');
+          if (item.errorMessage != null) buffer.writeln('  Error: ${item.errorMessage}');
+          buffer.writeln('');
+        }
+      }
+
+      buffer.writeln('=' * 50);
+      buffer.writeln('End of Report');
+
+      Directory? directory;
+
+      if (Platform.isAndroid) {
+        // Direct path to the public Downloads folder
+        directory = Directory('/storage/emulated/0/Download');
+
+        // Safety check: if the path doesn't exist, fallback to external storage
+        if (!await directory.exists()) {
+          directory = await getExternalStorageDirectory();
+        }
+      } else {
+        directory = await getApplicationDocumentsDirectory();
+      }
+
+      final String filePath = '${directory!.path}/$fileName';
+      final File file = File(filePath);
+
+      // Write with flush: true to ensure the OS finishes the write operation
+      await file.writeAsString(buffer.toString(), flush: true);
+
+      // 4. Double Check: Ensure file has size before sharing
+      final stat = await file.stat();
+      if (stat.size == 0) {
+        throw Exception("File verification failed: Size is 0 bytes");
+      }
+
+      setState(() => _isDownloading = false);
+
+      // 5. Share with Explicit MIME Type
+      // Helps apps (like Google Drive or Gmail) know how to handle the file
+      await Share.shareXFiles(
+        [XFile(filePath, mimeType: 'text/plain')],
+        subject: 'Scanned Tag IDs Report',
+        text: 'Report generated with ${allItems.length} scanned items',
+      );
+
+      if (mounted) {
+        AppModal.showSuccess(
+          context: context,
+          title: 'Ready',
+          message: 'Choose "Save to Files" or Email to export.',
+        );
+      }
+    } catch (e) {
+      setState(() => _isDownloading = false);
+      if (mounted) {
+        AppModal.showError(
+          context: context,
+          title: 'Export Failed',
+          message: 'Error: ${e.toString()}',
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
@@ -128,7 +242,7 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
   Widget _buildHeader() {
     final totalBaskets = successItems.length;
     final totalFormers =
-        allItems.fold<int>(0, (sum, item) => sum + item.quantity);
+    allItems.fold<int>(0, (sum, item) => sum + item.quantity);
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -153,7 +267,7 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
             ),
           ),
 
-          /// ===== ROW 1: TITLE + TOTAL (ONE ROW) =====
+          /// Title and Download Button
           Row(
             children: [
               const Text(
@@ -165,21 +279,32 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
                   letterSpacing: 1.2,
                 ),
               ),
-              // const Spacer(),
-              // IconButton(
-              //   icon: const Icon(Icons.close),
-              //   onPressed: () => Navigator.pop(context),
-              //   style: IconButton.styleFrom(
-              //     backgroundColor: AppColors.slate100,
-              //     foregroundColor: AppColors.textSecondary,
-              //   ),
-              // ),
+              const Spacer(),
+              _isDownloading
+                  ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                ),
+              )
+                  : IconButton(
+                icon: const Icon(Icons.download, size: 20),
+                onPressed: _downloadTagIds,
+                tooltip: 'Download Tag IDs',
+                style: IconButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.all(8),
+                ),
+              ),
             ],
           ),
 
           const SizedBox(height: 8),
 
-          /// ===== ROW 2: FULL-WIDTH EXPANDING STATS =====
+          /// Stats Row
           Row(
             children: [
               Expanded(
@@ -398,18 +523,17 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Previous Button
           ElevatedButton.icon(
             onPressed: currentPage > 0
                 ? () {
-                    setState(() {
-                      if (isSuccessTab) {
-                        _currentSuccessPage--;
-                      } else {
-                        _currentErrorPage--;
-                      }
-                    });
-                  }
+              setState(() {
+                if (isSuccessTab) {
+                  _currentSuccessPage--;
+                } else {
+                  _currentErrorPage--;
+                }
+              });
+            }
                 : null,
             icon: const Icon(Icons.chevron_left, size: 20),
             label: const Text('PREV'),
@@ -426,7 +550,6 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
             ),
           ),
 
-          // Page Info
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
@@ -443,18 +566,17 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
             ),
           ),
 
-          // Next Button
           ElevatedButton.icon(
             onPressed: currentPage < totalPages - 1
                 ? () {
-                    setState(() {
-                      if (isSuccessTab) {
-                        _currentSuccessPage++;
-                      } else {
-                        _currentErrorPage++;
-                      }
-                    });
-                  }
+              setState(() {
+                if (isSuccessTab) {
+                  _currentSuccessPage++;
+                } else {
+                  _currentErrorPage++;
+                }
+              });
+            }
                 : null,
             icon: const Icon(Icons.chevron_right, size: 20),
             label: const Text('NEXT'),
@@ -672,23 +794,23 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
                           overflow: TextOverflow.ellipsis,
                         )
                       else if (item.status == ItemStatus.pending)
-                        const Text(
-                          'Fetching basket data...',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.textSecondary,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        )
-                      else if (item.status == ItemStatus.duplicate)
-                        const Text(
-                          'Already scanned',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFFD97706),
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
+                          const Text(
+                            'Fetching basket data...',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textSecondary,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          )
+                        else if (item.status == ItemStatus.duplicate)
+                            const Text(
+                              'Already scanned',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFFD97706),
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
                     ],
                   ),
                 ),

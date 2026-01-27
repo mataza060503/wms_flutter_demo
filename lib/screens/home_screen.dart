@@ -5,7 +5,7 @@ import '../config/constants/app_colors.dart';
 import '../config/routes/app_router.dart';
 
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({Key? key}) : super(key: key);
+  const HomeScreen({super.key});
 
   @override
   Widget build(BuildContext context) {

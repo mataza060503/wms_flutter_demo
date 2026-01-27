@@ -2,20 +2,20 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:core';
 import 'package:flutter/material.dart';
-import '../config/constants/app_colors.dart';
-import '../components/common/custom_card.dart';
-import '../components/common/app_modal.dart';
-import '../components/common/basket_detail_modal.dart';
-import '../components/common/bin_location_modal.dart';
-import '../components/common/rack_detail_modal.dart';
-import '../components/common/filled_basket_qty_modal.dart';
-import '../components/common/rfid_scanned_items_modal.dart';
-import '../services/rfid_scanner.dart';
-import '../services/api_service.dart';
+import 'package:wms_flutter/config/constants/app_colors.dart';
+import 'package:wms_flutter/components/common/custom_card.dart';
+import 'package:wms_flutter/components/common/app_modal.dart';
+import 'package:wms_flutter/components/common/basket_detail_modal.dart';
+import 'package:wms_flutter/components/common/bin_location_modal.dart';
+import 'package:wms_flutter/components/common/rack_detail_modal.dart';
+import 'package:wms_flutter/components/common/filled_basket_qty_modal.dart';
+import 'package:wms_flutter/components/common/rfid_scanned_items_modal.dart';
+import 'package:wms_flutter/services/rfid_scanner.dart';
+import 'package:wms_flutter/services/api_service.dart';
 import 'package:wms_flutter/models/scanned_item.dart';
 
 class FormerStockInScreen extends StatefulWidget {
-  const FormerStockInScreen({Key? key}) : super(key: key);
+  const FormerStockInScreen({super.key});
 
   @override
   State<FormerStockInScreen> createState() => _FormerStockInScreenState();
@@ -130,6 +130,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
         (error) => _showError('RFID Error', error),
       );
 
+      if (!mounted) return;
       AppModal.showSuccess(
         context: context,
         title: 'Connected',
@@ -350,6 +351,8 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
           _totalBaskets = 0;
           _totalFormers = 0;
         });
+
+        if (!mounted) return;
         AppModal.showSuccess(
           context: context,
           title: 'Cleared',
@@ -423,6 +426,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       _totalFormers = 0;
     });
 
+    if (!mounted) return;
     AppModal.showSuccess(
       context: context,
       title: 'Rack Added',
@@ -476,6 +480,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
       backgroundColor: AppColors.backgroundLight,
       appBar: _buildAppBar(),
       body: _buildOptimizedBody(),
+      bottomNavigationBar: _buildBottomBar(),
     );
   }
 
@@ -500,7 +505,6 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
             ],
           ),
         ),
-        _buildBottomBar(),
       ],
     );
   }
@@ -1106,117 +1110,96 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
   }
 
   Widget _buildBottomBar() {
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.9),
-          border: const Border(top: BorderSide(color: AppColors.slate200)),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: _addCurrentScannedToRack,
-                icon: const Icon(Icons.add, size: 20),
-                label: const Text(
-                  'Add',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.slate100,
-                  foregroundColor: AppColors.slate700,
-                  elevation: 0,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        border: const Border(top: BorderSide(color: AppColors.slate200)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: _addCurrentScannedToRack,
+              icon: const Icon(Icons.add, size: 20),
+              label: const Text(
+                'Add',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.slate100,
+                foregroundColor: AppColors.slate700,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
                 ),
               ),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              flex: 2,
-              child: ElevatedButton.icon(
-                onPressed: _allRackTagIds.isEmpty
-                    ? null
-                    : () async {
-                        final confirm = await AppModal.showConfirm(
-                          context: context,
-                          title: 'Save All Items',
-                          message:
-                              'Save ${_allRackTagIds.length} scanned items?',
-                        );
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 2,
+            child: ElevatedButton.icon(
+              onPressed: _allRackTagIds.isEmpty
+                  ? null
+                  : () async {
+                final confirm = await AppModal.showConfirm(
+                  context: context,
+                  title: 'Save All Items',
+                  message:
+                  'Save ${_allRackTagIds.length} scanned items?',
+                );
 
-                        if (confirm == true) {
-                          AppModal.showSuccess(
-                            context: context,
-                            title: 'Saved',
-                            message:
-                                '${_allRackTagIds.length} items saved successfully',
-                          );
-                        }
-                      },
-                icon: const Icon(Icons.save, size: 20),
-                label: const Text(
-                  'SAVE ALL',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
+                if (!mounted) return;
+
+                if (confirm == true) {
+                  AppModal.showSuccess(
+                    context: context,
+                    title: 'Saved',
+                    message:
+                    '${_allRackTagIds.length} items saved successfully',
+                  );
+                }
+              },
+              icon: const Icon(Icons.save, size: 20),
+              label: const Text(
+                'SAVE ALL',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                elevation: 4,
+                shadowColor: AppColors.primary.withOpacity(0.3),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Colors.white,
-                  elevation: 4,
-                  shadowColor: AppColors.primary.withOpacity(0.3),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  disabledBackgroundColor: AppColors.slate200,
-                  disabledForegroundColor: AppColors.slate700,
-                ),
+                disabledBackgroundColor: AppColors.slate200,
+                disabledForegroundColor: AppColors.slate700,
               ),
             ),
-            const SizedBox(width: 12),
-            SizedBox(
-              width: 48,
-              height: 48,
-              child: ElevatedButton(
-                onPressed: _handleExit,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFFFF1F2),
-                  foregroundColor: const Color(0xFFE11D48),
-                  elevation: 0,
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 48,
+            height: 48,
+            child: ElevatedButton(
+              onPressed: _handleExit,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFFF1F2),
+                foregroundColor: const Color(0xFFE11D48),
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
                 ),
-                child: const Icon(Icons.close, size: 24),
               ),
+              child: const Icon(Icons.close, size: 24),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 }
-
-enum ScannerStatus {
-  disconnected,
-  initializing,
-  initialized,
-  connected,
-  scanning,
-  stopped,
-}
-
-enum BasketMode { full, filled, empty }

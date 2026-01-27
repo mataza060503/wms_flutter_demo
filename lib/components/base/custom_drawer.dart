@@ -23,6 +23,12 @@ class CustomDrawer extends StatelessWidget {
                 ),
                 _buildDrawerItem(
                   context,
+                  icon: Icons.inventory_2,
+                  title: 'Former Master Data',
+                  route: AppRouter.formerMasterData,
+                ),
+                _buildDrawerItem(
+                  context,
                   icon: Icons.login,
                   title: 'Former Stock In',
                   route: AppRouter.formerStockIn,

@@ -7,6 +7,17 @@ enum ItemStatus {
   pending,
 }
 
+enum ScannerStatus {
+  disconnected,
+  initializing,
+  initialized,
+  connected,
+  scanning,
+  stopped,
+}
+
+enum BasketMode { full, filled, empty }
+
 class ScannedItem {
   final String id;
   int quantity;
