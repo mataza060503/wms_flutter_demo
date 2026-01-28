@@ -130,20 +130,21 @@ class _RfidScannedItemsModalState extends State<RfidScannedItemsModal> with Sing
         buffer.writeln('SUCCESS ITEMS (${successItems.length}):');
         buffer.writeln('-' * 50);
         for (var item in successItems) {
-          buffer.writeln('Tag ID: ${item.id}');
-          buffer.writeln('  Quantity: ${item.quantity}');
-          if (item.vendor.isNotEmpty) buffer.writeln('  Vendor: ${item.vendor}');
-          if (item.bin.isNotEmpty) buffer.writeln('  Bin: ${item.bin}');
-          buffer.writeln('');
+          buffer.writeln(item.id);
+          // buffer.writeln('  Quantity: ${item.quantity}');
+          // if (item.vendor.isNotEmpty) buffer.writeln('  Vendor: ${item.vendor}');
+          // if (item.bin.isNotEmpty) buffer.writeln('  Bin: ${item.bin}');
+          // buffer.writeln('');
         }
       }
 
       if (errorItems.isNotEmpty) {
+        buffer.writeln('');
         buffer.writeln('ERROR ITEMS (${errorItems.length}):');
         buffer.writeln('-' * 50);
         for (var item in errorItems) {
           buffer.writeln('Tag ID: ${item.id}');
-          buffer.writeln('  Status: ${item.status.toString()}');
+          // buffer.writeln('  Status: ${item.status.toString()}');
           if (item.errorMessage != null) buffer.writeln('  Error: ${item.errorMessage}');
           buffer.writeln('');
         }

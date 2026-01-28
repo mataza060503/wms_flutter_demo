@@ -455,7 +455,7 @@ class _FormerStockOutScreenState extends State<FormerStockOutScreen>
         existingItem.status = ItemStatus.success;
         existingItem.quantity = quantity;
         existingItem.vendor = basketData.basketVendor;
-        existingItem.bin = basketData.basketPurchaseOrder;
+        existingItem.bin = basketData.bin;
         existingItem.basketData = basketData;
       } else {
         existingItem.status = ItemStatus.error;

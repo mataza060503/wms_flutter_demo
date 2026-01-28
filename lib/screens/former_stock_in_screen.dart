@@ -239,7 +239,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
         existingItem.status = ItemStatus.success;
         existingItem.quantity = quantity;
         existingItem.vendor = basketData.basketVendor;
-        existingItem.bin = basketData.basketPurchaseOrder;
+        existingItem.bin = basketData.bin;
         existingItem.basketData = basketData;
       } else {
         existingItem.status = ItemStatus.error;
@@ -1191,6 +1191,7 @@ class _FormerStockInScreenState extends State<FormerStockInScreen> {
                 backgroundColor: const Color(0xFFFFF1F2),
                 foregroundColor: const Color(0xFFE11D48),
                 elevation: 0,
+                padding: EdgeInsets.zero,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
                 ),
